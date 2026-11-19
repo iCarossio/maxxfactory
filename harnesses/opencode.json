@@ -1,0 +1,65 @@
+{
+  "name": "opencode",
+  "binary": "opencode",
+  "vendor": "by_model",
+  "doc": "opencode: free models (opencode/*-free), OpenCode Go subscription (opencode-go/*), OpenRouter (openrouter/* :free ids only unless the account has credits). --standalone keeps the run in our process group (the background service keeps ghost sessions alive otherwise). Accounts: XDG_DATA_HOME selects the data directory that holds opencode's auth.json (~/.local/share/opencode/auth.json), so a second account lives in ~/.local/share-b (standard <default>-<letter>); config (~/.config/opencode) stays shared.",
+  "run": {
+    "argv": [
+      "run",
+      "--standalone",
+      "-m",
+      "{model}",
+      "--agent",
+      "build",
+      "{prompt}"
+    ],
+    "env": {
+      "OPENCODE_PERMISSION": "{\"*\":\"allow\"}",
+      "OPENCODE_CONFIG_CONTENT": "{\"tools\":{\"websearch\":false}}"
+    },
+    "output": "stdout",
+    "env_doc": "OPENCODE_CONFIG_CONTENT disables the websearch tool: in opencode 2.3.0 a headless run that calls it fails with \"Cancelled a request for input this run cannot answer: Web Search\" (exit 1) even with OPENCODE_PERMISSION allow-all. The model falls back to WebFetch."
+  },
+  "account_env": "XDG_DATA_HOME",
+  "account_default": "~/.local/share",
+  "list_models": {
+    "kind": "command",
+    "argv": [
+      "models"
+    ],
+    "regex": "^\\s*(\\S+/\\S+)\\s*$"
+  },
+  "usage": {
+    "kind": "opencode_limits",
+    "note": "OpenCode Go allowance (rolling 5 h, weekly, monthly) from `opencode api --standalone GET /api/experimental/usage/limits`, on the account of the entry env (XDG_DATA_HOME). Free models (opencode/*-free, OpenRouter :free) have no tracked window.",
+    "argv": [
+      "api",
+      "--standalone",
+      "GET",
+      "/api/experimental/usage/limits"
+    ],
+    "windows": {
+      "rolling": "5h",
+      "weekly": "weekly",
+      "monthly": "monthly"
+    },
+    "window_groups": {
+      ".": "^opencode-go/(?!.*free)"
+    }
+  },
+  "quota_patterns": [
+    "usage limit",
+    "Free usage limit reached",
+    "Go usage limit exceeded"
+  ],
+  "account_detect": "~/.local/share-[a-z]",
+  "account_login": {
+    "file": "opencode/auth.json"
+  },
+  "tokens": {
+    "kind": "opencode_db",
+    "path": "$XDG_DATA_HOME/opencode/opencode.db"
+  },
+  "coordinator_env": [],
+  "coordinator_env_doc": "variables this CLI sets in the processes it starts: when one is set, the coordinator session runs on this CLI, on the account its account_env names in this process (unset = default home). AUTOPILOT_COORDINATOR=<cli>[/<account>] overrides."
+}

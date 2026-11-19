@@ -1,0 +1,528 @@
+#!/usr/bin/env python3
+"""harness: registry of model CLIs ("harnesses"), accounts and the model roster. Used by the maxxfactory-init skill.
+
+  harness init [--import <models.json>] [--force] [--allow-fast]
+                                                       # create $AUTOPILOT_CONFIG_DIR/models.json from templates/models.json (or import an existing roster);
+                                                       # speed variants ('-fast' ids) are dropped unless the owner passes --allow-fast
+  harness discover                                     # CLIs with a real executable on PATH (a shell alias/function does not count), adapters, accounts on disk
+  harness list                                         # roster table: key, cli, model, account, vendor, tier, subscription, roles, health
+  harness check                                        # the policy summary: role -> candidates (tier, account, subscription, health), then
+                                                       # every missing piece with what to do; exit 1 when something blocks a role or an entry is refused
+  harness migrate [--dry-run]                          # convert a pre-2026-11-09 roster: level + vendor per entry, roles, subscription, no pools
+  harness add-model <key> --cli <cli> --model <id> [--level 0-4] [--vendor V] [--subscription paid|paid?|free|reserved]
+                    [--plan NAME] [--family PATTERN] [--cost high|mid|cheap|free] [--no-implement] [--env K=V ...] [--note TEXT] [--allow-fast]
+                                                       # level defaults to the owner's tier table; vendor -> CLI is enforced (refused otherwise);
+                                                       # a speed variant ('-fast', 'build-fast') is refused unless the owner passes --allow-fast
+  harness add-account <cli> <letter> [--label TEXT] [--subscription S] [--plan NAME] [--home PATH --nonstandard]
+                                                       # the account standard: the default home is the CLI's own (~/.codex), the next accounts are
+                                                       # <default>-b, <default>-c, ... and the roster keys are <key>-b, <key>-c. `add-account codex b`
+                                                       # clones every base model of codex as <key>-b with CODEX_HOME=~/.codex-b. A non-standard home
+                                                       # needs --home PATH --nonstandard (discover keeps flagging it).
+  harness subscription <cli> <account|default> <paid|paid?|free|reserved> [--plan NAME] [--reason TEXT]
+                                                       # what the owner pays for, per account (every key of that account); reserved = never used
+  harness whoami                                       # the coordinator account detected for this session (never configured): its keys are
+                                                       # last resort, cheap roles only, quota-guarded
+  harness set <key> <level|subscription|plan|excluded|vendor> <value>   # one field, validated (excluded "" re-enables)
+  harness remove <key>
+  harness set-home <cli> <old-home> <new-home>         # point every roster entry of <cli> using <old-home> at <new-home> (after you moved the directory)
+  harness new <name> --binary B --vendor V --argv '<json list of strings with {prompt} [{model}] [{out}]>' [--output stdout|file]
+              [--account-env VAR --account-default PATH --account-detect GLOB] [--coordinator-env VAR[,VAR]] [--list-cmd 'args' --list-regex RX]
+              [--usage-cmd 'args' --usage-regex RX --usage-groups window,used|remaining,reset_text|reset_iso] [--env K=V ...] [--doc TEXT]
+              [--tokens-kind codex_sessions|claude_projects|opencode_db|pi_sessions|grok_sessions|agy_brain|gemini_chats --tokens-path PATH]
+                                                       # write a new adapter to $AUTOPILOT_CONFIG_DIR/harnesses/<name>.json; --tokens-* tells
+                                                       # `bin/tokens` which local log format the CLI writes and where ($VAR of account_env allowed)
+  harness pools                                        # role -> candidates (same as the first part of `check`)
+  harness adapters                                     # adapters known (repo + user), with the run command of each
+
+There are no hand-ordered pools: a role's candidates are the roster entries of its tier (lib "tier policy"), drawn at
+run time weighted by the credit left on each account. Config: $AUTOPILOT_CONFIG_DIR (default ~/.config/maxxfactory).
+Nothing personal is ever written into the repo.
+"""
+import datetime as dt, glob, json, os, re, shutil, subprocess, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+COSTS = ('high', 'mid', 'cheap', 'free')
+KNOWN_CLIS = ['codex', 'claude', 'opencode', 'pi', 'grok', 'agy', 'vibe', 'gemini', 'aider', 'goose', 'amp', 'copilot', 'kiro', 'qwen', 'droid', 'crush']
+today = lambda: str(dt.date.today())
+
+
+def opt(args, name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
+def envs(args):
+    return {kv.split('=', 1)[0]: kv.split('=', 1)[1] for i, kv in enumerate(args) if i > 0 and args[i - 1] == '--env' and '=' in kv}
+
+
+def cmd_init(args):
+    if os.path.exists(lib.REG) and '--force' not in args:
+        print(f'roster exists: {lib.REG} (use --force to overwrite)'); return
+    src = os.path.expanduser(opt(args, '--import') or os.path.join(lib.HOME, 'templates', 'models.json'))
+    r = lib.read_json(src)
+    r.setdefault('health', {}); r.setdefault('changelog', []); r.setdefault('models', {})
+    for k in [k for k, m in r['models'].items() if lib.is_fast_model(m.get('model', '')) and not m.get('allow_fast')]:
+        if '--allow-fast' in args:
+            r['models'][k]['allow_fast'] = True
+        else:
+            print('harness init: dropped %s (%s): %s' % (k, r['models'].pop(k)['model'], lib.FAST_WHY))
+    if r.get('pools'):
+        print('note: %s has hand-ordered pools (pre-2026-11-09 format): run `bin/harness migrate`' % src)
+    r['changelog'].append({'date': today(), 'change': f'roster created from {src}'})
+    os.makedirs(lib.CONFIG_DIR, exist_ok=True)
+    with lib.locked(lib.REG):
+        lib.write_json_atomic(lib.REG, r)
+    for d in ('harnesses', 'prompts'):
+        os.makedirs(os.path.join(lib.CONFIG_DIR, d), exist_ok=True)
+    print(f'wrote {lib.REG} ({len(r["models"])} models). Next: harness discover, harness subscription ..., harness coordinator ..., harness check')
+
+
+def version_of(exe):
+    try:
+        p = subprocess.run([exe, '--version'], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+        t = (p.stdout or p.stderr).strip()
+        return t.splitlines()[0][:60] if t else ''
+    except Exception:
+        return ''
+
+
+def account_identity(a, home):
+    """(logged_in, label) for one account directory, from the adapter's `account_login` spec: a login file, and
+    optionally claims of a JWT inside it (email, plan). Tokens are never printed."""
+    spec = a.get('account_login')
+    if not spec:
+        return None, ''
+    f = os.path.join(home, spec['file'])
+    if not os.path.exists(f):
+        return False, ''
+    ident = spec.get('identity')
+    if not ident:
+        return True, ''
+    try:
+        import base64
+        data = lib.read_json(f)
+        for part in ident['jwt'].split('.'):
+            data = data[part]
+        payload = data.split('.')[1]; payload += '=' * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+        out = []
+        for label, path in ident.get('claims', {}).items():  # nested claims are written `outer|inner` (claim names may contain dots and slashes)
+            cur = claims
+            for part in path.split('|'):
+                cur = cur.get(part) if isinstance(cur, dict) else None
+            if cur:
+                out.append('%s=%s' % (label, str(cur)[:12] + '...' if label == 'account' else str(cur)))
+        return True, ' '.join(out)
+    except Exception:
+        return True, '(identity unreadable)'
+
+
+def cmd_discover(args):
+    ad = lib.adapters(); r = lib.read_json(lib.REG) if os.path.exists(lib.REG) else {'models': {}}
+    rows = []
+    for name in sorted(set(list(ad) + KNOWN_CLIS)):
+        a = ad.get(name); binary = a.get('binary', name) if a else name
+        exe = shutil.which(binary)
+        if exe and not (os.path.isfile(os.path.realpath(exe)) and os.access(os.path.realpath(exe), os.X_OK)): exe = None
+        if not exe and not a: continue
+        accounts = []
+        if a and a.get('account_detect'):
+            default = os.path.realpath(os.path.expanduser(a.get('account_default', '')))
+            roster_homes = {os.path.realpath(os.path.expanduser(lib.explicit_account(m, a) or a.get('account_default', ''))) for m in r['models'].values() if m['cli'] == name}
+            for p in sorted(glob.glob(os.path.expanduser(a['account_detect']))):
+                if not os.path.isdir(p): continue
+                logged, who = account_identity(a, p)
+                accounts.append({'home': p, 'default': os.path.realpath(p) == default, 'logged_in': logged, 'identity': who,
+                                 'in_roster': os.path.realpath(p) in roster_homes})
+        in_roster = sorted({(k, lib.account_of(m, a)) for k, m in r['models'].items() if m['cli'] == name}) if a else []
+        rows.append({'cli': name, 'installed': bool(exe), 'path': exe or '', 'version': version_of(exe) if exe else '',
+                     'adapter': os.path.relpath(a['_path'], lib.HOME) if a else None, 'vendor': a.get('vendor') if a else None,
+                     'accounts_on_disk': accounts, 'roster_keys': [k for k, _ in in_roster],
+                     'roster_accounts': sorted({acc for _, acc in in_roster})})
+    for row in rows:
+        flag = 'ok' if row['installed'] and row['adapter'] else ('NO ADAPTER: harness new ' + row['cli'] if row['installed'] else
+                ('NOT INSTALLED (no executable on PATH; an alias or shell function does not count): %d roster keys unusable' % len(row['roster_keys']) if row['roster_keys'] else 'not installed'))
+        print(f"{row['cli']:<14} {flag:<40} {row['version'][:30]:<30} roster={len(row['roster_keys'])} accounts={row['roster_accounts'] or '-'}")
+        for acc in row['accounts_on_disk']:
+            if acc['logged_in'] is False:
+                state = 'NOT A LOGIN (no %s): ignore or delete' % ad[row['cli']]['account_login']['file']
+            elif acc['in_roster']:
+                state = 'in roster' + (' (default)' if acc['default'] else '')
+            else:
+                letter = os.path.basename(acc['home']).rsplit('-', 1)[-1]
+                state = 'NOT IN ROSTER: bin/harness add-account %s %s' % (row['cli'], letter)
+            print('    %-40s %-28s %s' % (acc['home'].replace(os.path.expanduser('~'), '~'), acc['identity'], state))
+        # Non-standard homes: anything in the roster whose home is not <default>-<letter>
+        a = ad.get(row['cli'])
+        if a and a.get('account_env'):
+            std = re.compile(re.escape(os.path.expanduser(a.get('account_default', '')).rstrip('/')) + r'-[b-z]$')
+            for k, m in r['models'].items():
+                home = lib.explicit_account(m, a) if m['cli'] == row['cli'] else None
+                if home and not std.match(os.path.expanduser(home)):
+                    print('    NON-STANDARD home for %s: %s (standard: %s-<letter>; rename the directory and fix the roster with `harness set-home`)' % (k, home, a.get('account_default', '')))
+    print(json.dumps(rows))
+
+
+def roles_of(r, k, members):
+    return ','.join(role for role, ks in members.items() if k in ks)
+
+
+def cmd_list(args):
+    r = lib.load_reg(); ad = lib.adapters(); nowt = lib.now(); members = lib.pools(r, ad); bad = lib.refused(r, ad)
+    print(f"{'key':<24} {'cli':<9} {'model':<40} {'account':<30} {'vendor':<10} {'tier':<4} {'subscription':<12} {'health':<12} roles")
+    for k, m in r['models'].items():
+        a = ad.get(m['cli'])
+        h = r['health'].get(k); cooled = h and lib.parse_time(h['until']) > nowt
+        health = f"cool {lib.parse_time(h['until']).astimezone():%d %H:%M}" if cooled else 'ok'
+        acc = m.get('account_label') or (lib.account_of(m, a) if a else '?')
+        lv = lib.level_of(r, m, a) if a else None
+        sub = m.get('subscription') or '?'
+        if a and lib.on_coordinator_account(r, m, a): sub += ' (COORDINATOR)'
+        exr = lib.excluded_reason(r, k, m, a) if a else None
+        state = 'REFUSED: ' + bad[k] if k in bad else ('EXCLUDED: ' + exr if exr else
+                ('CLI NOT INSTALLED' if a and not lib.installed(a) else roles_of(r, k, members)))
+        print(f"{k:<24} {m['cli']:<9} {m['model'][:40]:<40} {acc[:30]:<30} {(lib.vendor_of(m, a) if a else '?'):<10} {str(lv):<4} {sub:<12} {health:<12} {state}")
+
+
+def default_level(r, model, m):
+    lv, e = lib.table_level(r, model)
+    if lib.forced_four(m, lib.adapters().get(m['cli'])): return 4
+    return lv
+
+
+def cmd_add_model(args):
+    key = args[0]; ad = lib.adapters()
+    cli = opt(args, '--cli'); model = opt(args, '--model')
+    if not cli or not model: sys.exit('harness add-model: --cli and --model are required')
+    if cli not in ad: sys.exit(f'harness add-model: no adapter for {cli} (harness new {cli} ...)')
+    cost = opt(args, '--cost', 'mid')
+    if cost not in COSTS: sys.exit(f'--cost must be one of {COSTS}')
+    fam = opt(args, '--family') or re.sub(r'\d+(?:[.-]\d+)*', '*', model, count=1)
+    m = {'cli': cli, 'model': model, 'family': fam, 'tier': opt(args, '--tier', cost), 'cost': cost}
+    m['vendor'] = opt(args, '--vendor') or lib.vendor_of(m, ad[cli])
+    r0 = lib.load_reg()
+    lv = opt(args, '--level')
+    m['level'] = int(lv) if lv is not None else default_level(r0, model, m)
+    if m['level'] is None:
+        sys.exit(f'harness add-model: the tier table does not know {model}: pass --level 0-4 (README "Tiers")')
+    m['subscription'] = opt(args, '--subscription') or ('free' if lib.is_free_model(m) else 'paid?')
+    if opt(args, '--plan'): m['plan'] = opt(args, '--plan')
+    if '--no-implement' in args: m['no_implement'] = True
+    if '--allow-fast' in args and lib.is_fast_model(model): m['allow_fast'] = True
+    if envs(args): m['env'] = envs(args)
+    if opt(args, '--note'): m['note'] = opt(args, '--note')
+    probs = lib.entry_problems(r0, key, m, ad)
+    if probs: sys.exit('harness add-model: refused %s: %s' % (key, '; '.join(probs)))
+    if opt(args, '--pools'): print('note: --pools is ignored: roles take models by tier (harness check)')
+
+    def fn(r):
+        r['models'][key] = m
+        r['changelog'].append({'date': today(), 'change': f"add-model {key} ({cli} {model}, Tier {m['level']}, {m['vendor']}, {m['subscription']})"})
+    lib.update_reg(fn)
+    print(f'added {key}: {json.dumps(m)}')
+
+
+def standard_home(a, letter):
+    return '%s-%s' % (a.get('account_default', '').rstrip('/'), letter)
+
+
+def tilde(path):
+    """Store homes in portable `~/...` form: the roster is per user, not per machine path."""
+    home = os.path.expanduser('~').rstrip('/')
+    full = os.path.abspath(os.path.expanduser(path))
+    return '~' + full[len(home):] if full == home or full.startswith(home + '/') else path
+
+
+def cmd_add_account(args):
+    cli, suffix = args[0], args[1]; label = opt(args, '--label')
+    a = lib.adapters().get(cli)
+    if not a: sys.exit(f'no adapter for {cli}')
+    if not a.get('account_env'): sys.exit(f'harness add-account: the {cli} adapter declares no account_env (this CLI has no multi-home support; add it to the adapter first)')
+    if not re.fullmatch(r'[b-z]', suffix): sys.exit('harness add-account: the account suffix is one letter from b (default account = no suffix, then b, c, ...)')
+    home = tilde(opt(args, '--home') or standard_home(a, suffix))
+    if home != standard_home(a, suffix) and '--nonstandard' not in args:
+        sys.exit('harness add-account: non-standard home %s (standard: %s); rename the directory, or pass --nonstandard to keep it' % (home, standard_home(a, suffix)))
+    env = {a['account_env']: home}
+    legacy = {kv.split('=', 1)[0]: kv.split('=', 1)[1] for kv in args[2:] if '=' in kv and not kv.startswith('--')}
+    if legacy and '--nonstandard' not in args: sys.exit('harness add-account: K=V overrides need --nonstandard; the standard form is `harness add-account %s %s`' % (cli, suffix))
+    env.update(legacy)
+    spec = a.get('account_login')
+    if spec and not os.path.exists(os.path.join(os.path.expanduser(home), spec['file'])):
+        print('note: %s has no %s yet: log in once with `%s=%s %s login` (or the CLI\'s own login command) before using it' % (home, spec['file'], a['account_env'], home, a.get('binary', cli)))
+    added = []
+
+    def fn(r):
+        for k, m in list(r['models'].items()):
+            if m['cli'] != cli or lib.explicit_account(m, a): continue  # base entries = no account override of their own
+            nk = f'{k}-{suffix}'
+            if nk in r['models']: continue
+            nm = dict(m); nm['env'] = {**m.get('env', {}), **env}
+            for f in ('account_label', 'plan', 'excluded'): nm.pop(f, None)
+            # another login is its own plan (the coordinator's account is detected per session, never copied)
+            nm['subscription'] = opt(args, '--subscription') or ('free' if lib.is_free_model(nm) else 'paid?')
+            if opt(args, '--plan'): nm['plan'] = opt(args, '--plan')
+            if label: nm['account_label'] = label
+            r['models'][nk] = nm; added.append(nk)
+        r['changelog'].append({'date': today(), 'change': f'add-account {cli} {suffix} {env}: {added}'})
+    lib.update_reg(fn)
+    print(f'added {len(added)} keys: {added} (home {home})')
+
+
+def cmd_set_home(args):
+    cli, old, new = args[0], args[1], args[2]
+    a = lib.adapters().get(cli) or sys.exit(f'no adapter for {cli}')
+    k = a.get('account_env') or sys.exit(f'{cli} has no account_env')
+    norm = lambda p: os.path.realpath(os.path.expanduser(p))
+
+    def fn(r):
+        n = 0
+        for key, m in r['models'].items():
+            if m['cli'] == cli and norm((m.get('env') or {}).get(k, '')) == norm(old):
+                m['env'][k] = tilde(new); n += 1
+        r['changelog'].append({'date': today(), 'change': f'set-home {cli} {old} -> {new} ({n} entries)'})
+        return n
+    print('updated %d entries' % lib.update_reg(fn))
+
+
+def cmd_remove(args):
+    key = args[0]
+
+    def fn(r):
+        r['models'].pop(key, None); r['health'].pop(key, None)
+        r['changelog'].append({'date': today(), 'change': f'remove {key}'})
+    lib.update_reg(fn); print(f'removed {key}')
+
+
+def cmd_new(args):
+    name = args[0]
+    binary = opt(args, '--binary', name); vendor = opt(args, '--vendor', 'by_model'); argv = opt(args, '--argv')
+    if not argv: sys.exit("harness new: --argv '<json list>' is required, e.g. '[\"-p\",\"{prompt}\",\"--model\",\"{model}\",\"--yes\"]'")
+    try: argv = json.loads(argv)
+    except Exception as e: sys.exit(f'harness new: --argv is not valid JSON: {e}')
+    if not isinstance(argv, list) or not argv or any(not isinstance(x, str) or not x for x in argv):
+        sys.exit('harness new: --argv must be a non-empty JSON list of non-empty strings')
+    if not any('{prompt}' in x for x in argv): sys.exit('harness new: one argv element must contain {prompt}')
+    output = opt(args, '--output', 'stdout')
+    if output not in ('stdout', 'file'): sys.exit('harness new: --output must be stdout or file')
+    if output == 'file' and not any('{out}' in x for x in argv): sys.exit('harness new: --output file needs an argv element containing {out}')
+    a = {'name': name, 'binary': binary, 'vendor': vendor, 'doc': opt(args, '--doc', ''),
+         'run': {'argv': argv, 'env': envs(args), 'output': output},
+         'list_models': {'kind': 'none'}, 'usage': {'kind': 'none', 'note': 'no usage probe: set cooldowns from the reset time in quota errors'},
+         'quota_patterns': ['quota', 'rate limit', 'usage limit'],
+         'tokens': {'kind': 'none', 'note': 'no local token log known for this CLI (harness new --tokens-kind ... --tokens-path ... if it writes one)'}}
+    if opt(args, '--tokens-kind'):
+        kinds = ('codex_sessions', 'claude_projects', 'opencode_db', 'pi_sessions', 'grok_sessions', 'agy_brain', 'gemini_chats')
+        if opt(args, '--tokens-kind') not in kinds or not opt(args, '--tokens-path'): sys.exit('harness new: --tokens-kind must be one of %s and come with --tokens-path' % ', '.join(kinds))
+        a['tokens'] = {'kind': opt(args, '--tokens-kind'), 'path': opt(args, '--tokens-path')}
+    if opt(args, '--coordinator-env'):
+        a['coordinator_env'] = [x for x in opt(args, '--coordinator-env').split(',') if x]
+    if opt(args, '--account-env'):
+        a['account_env'] = opt(args, '--account-env'); a['account_default'] = opt(args, '--account-default', '')
+        a['account_detect'] = opt(args, '--account-detect') or (a['account_default'].rstrip('/') + '-[a-z]')  # the standard: <default>-<letter>
+    if opt(args, '--list-cmd'):
+        a['list_models'] = {'kind': 'command', 'argv': opt(args, '--list-cmd').split(), 'regex': opt(args, '--list-regex', r'^\s*(\S+)\s*$')}
+    if opt(args, '--usage-cmd'):
+        groups = opt(args, '--usage-groups', 'window,used,reset_text').split(',')
+        if 'window' not in groups or not ({'used', 'remaining'} & set(groups)): sys.exit('harness new: --usage-groups needs window and used|remaining')
+        a['usage'] = {'kind': 'command', 'argv': opt(args, '--usage-cmd').split(), 'regex': opt(args, '--usage-regex', ''), 'groups': groups}
+    d = os.path.join(lib.CONFIG_DIR, 'harnesses'); os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, f'{name}.json'); lib.write_json_atomic(p, a)
+    print(f'wrote {p}. Next: harness add-model <key> --cli {name} --model <id> [--level 0-4] --subscription <paid|free|...>, then run-model smoke <key>')
+
+
+def summary(r, ad):
+    """(lines, problems): role -> candidates with tier, account, subscription, health; then what is missing."""
+    nowt = lib.now(); lines, probs = [], []
+    rl = lib.roles(r)
+    for role in list(lib.ROLES_DEFAULT) + ['escalate']:
+        ks = lib.candidates(r, role, ad)
+        lines.append('%-17s Tier %-4s %s' % (role, '/'.join(map(str, rl[role])), '(none)' if not ks else ''))
+        for k in ks:
+            m = r['models'][k]; a = ad[m['cli']]; h = r['health'].get(k)
+            hl = 'cool until %s' % lib.parse_time(h['until']).astimezone().strftime('%d %H:%M') if h and lib.parse_time(h['until']) > nowt else 'ok'
+            coord = lib.on_coordinator_account(r, m, a)
+            sub = (m.get('subscription') or 'paid?') + (' COORDINATOR: last resort%s' % ('' if role in lib.CHEAP_ROLES else ', only if nothing else') if coord else '')
+            left = lib.credit_left(r, lib.account_key(m, a))
+            lines.append('    %-22s %-34s %-10s %-30s %-30s %s%s' % (k, m['model'][:34], lib.vendor_of(m, a), (m.get('account_label') or lib.account_of(m, a))[:30],
+                                                         (sub + (' ' + m['plan'] if m.get('plan') else ''))[:30], hl,
+                                                         '' if left is None else ', %d%% left' % round(left * 100)))
+    for k, why in sorted(lib.refused(r, ad).items()):
+        probs.append('refused %s: %s -> fix the entry (harness set / remove) or reach the model through its vendor CLI' % (k, why))
+    for name, a in sorted(ad.items()):
+        ks = [k for k, m in r['models'].items() if m['cli'] == name and not lib.excluded_reason(r, k, m, a)]
+        if ks and not lib.installed(a):
+            probs.append('CLI %s (%s) is not installed as an executable (an alias or shell function does not count): %s unusable -> install it or `harness set <key> excluded "not installed"`' % (name, a.get('binary', name), ', '.join(ks)))
+    for role in ('implement', 'review', 'plan_review', 'premortem', 'milestone_review', 'trivial'):
+        ks = [k for k in lib.candidates(r, role, ad) if not lib.on_coordinator_account(r, r['models'][k], ad[r['models'][k]['cli']]) or role in lib.CHEAP_ROLES]
+        if not ks:
+            probs.append('role %s has no candidate of Tier %s -> add a model of that tier (harness add-model) or an account' % (role, '/'.join(map(str, rl[role]))))
+    vs = {lib.vendor_of(r['models'][k], ad[r['models'][k]['cli']]) for k in lib.candidates(r, 'review', ad)}
+    if len(vs) < 2:
+        probs.append('review has %d Tier-2 vendor(s) (%s): a reviewer of another vendor than the implementer is preferred; one vendor works but an outage stops every review' % (len(vs), ', '.join(sorted(vs)) or 'none'))
+    ca = lib.coordinator_account(r)
+    if not ca:
+        probs.append('coordinator account not detected (run from the coordinator session, or AUTOPILOT_COORDINATOR=<cli>[/<account>]): it cannot be protected')
+    else:
+        if not any(m['cli'] == ca[0] and ad.get(m['cli']) and lib.account_of(m, ad[m['cli']]) == ca[1] for m in r['models'].values()):
+            probs.append('coordinator account %s/%s has no roster entry (nothing to protect; fine if intended)' % ca)
+        cv = {lib.vendor_of(m, ad[m['cli']]) for m in r['models'].values() if ad.get(m['cli']) and lib.on_coordinator_account(r, m, ad[m['cli']], ca)}
+        cv = cv or {lib.vendor_of({'cli': ca[0], 'model': ''}, ad[ca[0]])} if ad.get(ca[0]) else cv
+        t1 = {lib.vendor_of(r['models'][k], ad[r['models'][k]['cli']]) for k in lib.candidates(r, 'plan_review', ad)} - cv
+        if not t1:
+            probs.append('no Tier 1 model of another vendor than the coordinator (%s): plan reviews and pre-mortems cannot run' % ', '.join(sorted(cv)))
+    unknown = sorted({lib.account_key(m, ad[m['cli']]) for k, m in r['models'].items() if ad.get(m['cli']) and not lib.excluded_reason(r, k, m, ad[m['cli']])
+                      and m.get('subscription') in (None, 'paid?')})
+    if unknown:
+        probs.append('subscription unknown for %s -> ask the owner once: `harness subscription <cli> <account> paid|free|reserved --plan NAME`' % ', '.join(unknown))
+    oc_go = sorted(k for k, m in r['models'].items() if m['cli'] == 'opencode' and m['model'].startswith('opencode-go/') and not lib.excluded_reason(r, k, m, ad.get('opencode')) and 'pi' in ad)
+    if oc_go:
+        probs.append('OpenCode Go models run through pi, not opencode (pi spends far fewer tokens on the same subscription; opencode stays for opencode/*-free and OpenRouter :free): `harness set <key> cli pi` for %s' % ', '.join(oc_go))
+    return lines, probs
+
+
+def cmd_check(args):
+    r = lib.load_reg(warn=False); ad = lib.adapters()
+    if r.get('pools'):
+        print('roster in the pre-2026-11-09 format (hand-ordered pools): run `bin/harness migrate` first'); sys.exit(1)
+    lines, probs = summary(r, ad)
+    print('\n'.join(lines))
+    print('\nMissing pieces:' if probs else '\nNothing missing.')
+    for p_ in probs: print('  - ' + p_)
+    blocking = [p_ for p_ in probs if p_.startswith(('refused', 'role ', 'no Tier 1', 'CLI '))]
+    sys.exit(1 if blocking else 0)
+
+
+def cmd_pools(args):
+    if args[:1] == ['set']:
+        sys.exit('harness pools set: there are no hand-ordered pools any more (tier policy). A role takes every model '
+                 'of its tier, drawn by credit left. Change a model with `harness set <key> level|subscription|excluded <value>`.')
+    r = lib.load_reg(); print('\n'.join(summary(r, lib.adapters())[0]))
+
+
+def account_keys(r, ad, cli, account):
+    return [k for k, m in r['models'].items() if m['cli'] == cli and ad.get(cli) and
+            (lib.account_of(m, ad[cli]) == account or (account != 'default' and os.path.realpath(os.path.expanduser(lib.explicit_account(m, ad[cli]) or '-')) == os.path.realpath(os.path.expanduser(account))))]
+
+
+def cmd_subscription(args):
+    cli, account, sub = args[0], args[1], args[2]; ad = lib.adapters()
+    if sub not in ('paid', 'paid?', 'free', 'reserved'): sys.exit('harness subscription: paid|paid?|free|reserved (the coordinator account is detected, not set)')
+
+    def fn(r):
+        ks = account_keys(r, ad, cli, account)
+        if not ks: sys.exit(f'harness subscription: no roster key on {cli} account {account} (harness list shows the accounts)')
+        for k in ks:
+            m = r['models'][k]
+            if lib.is_free_model(m) and sub != 'reserved': m['subscription'] = 'free'
+            else: m['subscription'] = sub
+            if opt(args, '--plan'): m['plan'] = opt(args, '--plan')
+            if sub == 'reserved': m['excluded'] = opt(args, '--reason', 'reserved by the owner for other uses')
+            elif str(m.get('excluded', '')).startswith('reserved'): m.pop('excluded')
+        r['changelog'].append({'date': today(), 'change': f'subscription {cli}/{account} = {sub} {opt(args, "--plan", "")}'.strip() + f': {", ".join(ks)}'})
+        return ks
+    print('updated: %s' % ', '.join(lib.update_reg(fn)))
+
+
+def cmd_whoami(args):
+    """The coordinator account detected for this process (adapter `coordinator_env` + `account_env`, or
+    $AUTOPILOT_COORDINATOR) and the roster keys on it: they become last resort, cheap roles only, quota-guarded."""
+    r = lib.load_reg(warn=False); ad = lib.adapters()
+    ca = lib.detect_coordinator(ad)
+    if not ca:
+        print('coordinator not detected: no adapter `coordinator_env` variable is set in this process; set AUTOPILOT_COORDINATOR=<cli>[/<account>]'); sys.exit(1)
+    ks = [k for k, m in r['models'].items() if ad.get(m['cli']) and lib.on_coordinator_account(r, m, ad[m['cli']], ca)]
+    print(json.dumps({'cli': ca[0], 'account': ca[1], 'keys': ks}))
+
+
+def cmd_set(args):
+    key, field, value = args[0], args[1], args[2] if len(args) > 2 else ''
+    if field not in ('level', 'subscription', 'plan', 'excluded', 'vendor', 'cli'): sys.exit('harness set: level|subscription|plan|excluded|vendor|cli')
+    if field == 'cli' and value not in lib.adapters(): sys.exit(f'harness set: no adapter for {value}')
+    ad = lib.adapters()
+
+    def fn(r):
+        m = r['models'].get(key) or sys.exit(f'unknown key {key}')
+        nm = dict(m)
+        if field == 'level': nm['level'] = int(value)
+        elif field == 'excluded' and not value: nm.pop('excluded', None)
+        else: nm[field] = value
+        probs = lib.entry_problems(r, key, nm, ad)
+        if probs: sys.exit('harness set: refused: ' + '; '.join(probs))
+        if field == 'level' and lib.forced_four(nm, ad.get(nm['cli'])) and int(value) != 4:
+            print('note: %s stays Tier 4 whatever its level (%s)' % (key, lib.forced_four(nm, ad.get(nm['cli']))))
+        r['models'][key] = nm
+        r['changelog'].append({'date': today(), 'change': f'set {key} {field} = {value!r}'})
+    lib.update_reg(fn); print('ok')
+
+
+def cmd_migrate(args):
+    """Pre-2026-11-09 roster -> tier format. Keeps every entry's `level` (else the tier table), adds `vendor`, the
+    default `subscription` (free for free models, paid? otherwise: ask the owner), normalises `coordinator_account`,
+    excludes entries that break vendor -> CLI, drops the hand-ordered `pools` (and `prefer`). Prints what it changed."""
+    ad = lib.adapters(); dry = '--dry-run' in args; notes = []
+
+    def fn(r):
+        legacy = r.pop('pools', None); r.pop('pools_doc', None); r.pop('prefer', None)
+        if legacy is not None:
+            notes.append('dropped the hand-ordered pools (%s)' % ', '.join(legacy))
+            pooled = {k for ks in legacy.values() for k in ks}
+            for k in r['models']:
+                if k not in pooled: notes.append('note: %s was in no pool; now a candidate of its tier unless excluded' % k)
+        r.setdefault('roles', {k: list(v) for k, v in lib.ROLES_DEFAULT.items()})
+        r.setdefault('coordinator_reserve', {'5h': 30, 'weekly': 20})
+        r.setdefault('roles_doc', 'role -> levels, bounded by the policy in code (README, Tiers)')
+        r.setdefault('review_wait_minutes', 90)
+        for k, m in r['models'].items():
+            a = ad.get(m['cli'])
+            if a and not m.get('vendor'):
+                m['vendor'] = lib.vendor_of(m, a); notes.append('%s vendor = %s' % (k, m['vendor']))
+            if m.get('level') is None:
+                lv = default_level(r, m['model'], m)
+                if lv is not None: m['level'] = lv; notes.append('%s level = %s (tier table)' % (k, lv))
+            if a and lib.forced_four(m, a) and m.get('level') != 4:
+                notes.append('%s level %s -> 4 (%s)' % (k, m.get('level'), lib.forced_four(m, a))); m['level'] = 4
+            if m.get('subscription') == 'coordinator':
+                plan = (r.get('coordinator_account') or {}).get('plan')
+                m['subscription'] = 'paid' if plan else 'paid?'
+                if plan and not m.get('plan'): m['plan'] = plan
+                notes.append('%s subscription coordinator -> %s (protection now follows the detected coordinator account)' % (k, m['subscription']))
+            if m.get('subscription') not in lib.SUBSCRIPTIONS:
+                old = m.get('subscription'); m['subscription'] = 'free' if lib.is_free_model(m) else 'paid?'
+                notes.append('%s subscription %s -> %s' % (k, old, m['subscription']))
+            if m.get('subscription') == 'reserved' and not m.get('excluded'):
+                m['excluded'] = 'reserved by the owner'
+            probs = lib.entry_problems(r, k, m, ad)
+            if probs and not m.get('excluded'):
+                m['excluded'] = 'tier policy: ' + '; '.join(probs); notes.append('EXCLUDED %s: %s' % (k, m['excluded']))
+        ca = r.pop('coordinator_account', None)
+        if ca:
+            notes.append('dropped models.json coordinator_account %s: the coordinator account is detected per session (harness whoami)' % json.dumps(ca))
+        r.setdefault('changelog', []).append({'date': today(), 'change': 'migrate to the tier policy (level, vendor, subscription, roles; no pools)', 'notes': notes[:60]})
+        if dry: raise _Dry()
+    try:
+        lib.update_reg(fn)
+    except _Dry:
+        pass
+    print(('DRY RUN, nothing written\n' if dry else '') + '\n'.join(notes or ['nothing to change']))
+
+
+class _Dry(Exception):
+    pass
+
+
+def cmd_adapters(args):
+    for name, a in lib.adapters().items():
+        print(f"{name:<10} {a.get('vendor', '?'):<10} {os.path.relpath(a['_path'], lib.HOME) if a['_path'].startswith(lib.HOME) else a['_path']}")
+        print(f"           {a.get('binary', name)} {' '.join(a['run']['argv'])}   env={a['run'].get('env', {})} output={a['run'].get('output', 'stdout')}")
+        if a.get('account_env'): print(f"           accounts via {a['account_env']} (default {a.get('account_default', '')}, detect {a.get('account_detect', '-')})")
+        print(f"           models: {a.get('list_models', {}).get('kind', 'none')}, usage: {a.get('usage', {}).get('kind', 'none')}")
+
+
+if __name__ == '__main__':
+    a = sys.argv[1:]
+    cmds = {'init': cmd_init, 'discover': cmd_discover, 'list': cmd_list, 'add-model': cmd_add_model, 'add-account': cmd_add_account,
+            'set-home': cmd_set_home, 'remove': cmd_remove, 'new': cmd_new, 'pools': cmd_pools, 'adapters': cmd_adapters,
+            'check': cmd_check, 'migrate': cmd_migrate, 'subscription': cmd_subscription, 'whoami': cmd_whoami, 'set': cmd_set}
+    if not a or a[0] not in cmds: print(__doc__); sys.exit(1)
+    cmds[a[0]](a[1:])

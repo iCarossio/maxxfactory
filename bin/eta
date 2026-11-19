@@ -1,0 +1,522 @@
+#!/usr/bin/env python3
+"""eta  -> progress bar for the whole project scope, then the ETA line (`eta -v` adds the schedule).
+
+The ETA is a schedule, not a throughput extrapolation:
+- `stages` in state.json: ordered list of stages, each a list of ticket ids that run in parallel. A stage
+  lasts as long as its slowest item; stages run one after the other. In-flight tickets missing from
+  `stages` form the first stage, queued tickets missing from it each get their own stage at the end.
+- Duration of an item: `est` in state.json (ticket -> {"min": minutes, "at": ISO time}) is the
+  coordinator's estimate of the minutes LEFT when it was set; for an in-flight item it counts down from
+  `at` and never drops below 15% of itself while the item is still open (an overdue item keeps a tail);
+  a queued item keeps its full estimate until it starts. Without `est`, the item
+  takes size x (measured minutes per size unit), where the measurement uses the tickets committed in the
+  last 8 active hours (gaps over 1 h count as 1 h) times the average parallelism `parallel`.
+- Re-plan signals (printed as `REPLAN:` lines after the ETA line): a slip of more than 30 min against
+  the reading 1-3 h ago (kept in `.autopilot/eta-history.jsonl`), two or more single-item stages in a
+  row, and fewer in-flight tickets than `parallel_target` (default 6) while work is queued, unless the
+  load average is over 2x the core count: then it says to shed load instead.
+- Update `est` whenever a round starts or ends (a review that sends a ticket back adds a round, ~30-40
+  min for a fix round); keep `stages` in step with the real dependency order.
+
+Progress = size-weighted done / (done + remaining), sizes from `sizes` (default 1.0; "S"/"M"/"L" count 1/2/3).
+
+Milestones (`milestones` in state.json, an ordered list of {"id", "name", "issues": [...]}, see `bin/milestone`): one
+line per milestone first (bar, done/total, its ETA = the end of the last stage holding one of its open tickets), then
+the overall line. A ticket also ends no earlier than its open `blockers` (state.json {ticket: [ticket, ...]}) plus its
+own duration, so a milestone never finishes before the tickets it waits on in other milestones; when that pushes a
+date past the stage schedule, a REPLAN line says `stages` is out of step (run `bin/milestone recompute`). Without
+`milestones` the output is the single overall line, as before. Tickets of a milestone missing from `queue`, `inflight`
+and `done` count as queued. Ideas (state.json `ideas`, see `bin/idea`) never count: not queued, no bar, no ETA.
+
+Unacknowledged CRITICAL alerts (`bin/alert`, e.g. a vendor out of quota on every account) print first, one
+`CRITICAL:` line each, so no message that starts with the ETA can leave them out.
+
+  eta [-v] [--json] [--from-mcp FILE]
+                       --json: one JSON object (overall + per milestone + replan + alerts) instead of the text lines
+                       --from-mcp: schedule from a Linear MCP snapshot instead of the stale queue in state.json.
+                       FILE is a list_issues result ({"issues": [...], "hasNextPage": false}) or a bare list.
+                       Optional "milestones" (list_milestones: id, name, sortOrder) sets the bar order.
+                       Each issue uses the MCP shape (id ENG-1, statusType, projectMilestone, estimate)
+                       or the GraphQL shape (identifier, state.type, inverseRelations).
+                       blockedBy, when present, is the blocker list; inverseRelations of type blocks is the same.
+                       Completed counts as done, started as in flight, canceled is left out.
+                       A partial page (hasNextPage true) is refused. A proposed milestone in state stays.
+                       No blockedBy field means open Linear tickets share one stage (a note on stderr).
+                       This reading writes no ETA history.
+Proposed milestones (state.json `proposed_milestones`, set by `bin/milestone add` before approval) are added on a
+what-if schedule and printed with "(proposed) ... (awaiting approval)"; such a reading writes no history and no slip.
+ETA_STATE=<file> reads that state instead (a what-if schedule: `bin/milestone add --dry-run`); no history is written.
+"""
+import datetime as dt, json, os, re, subprocess, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+IDENT = re.compile(r'^[A-Z][A-Z0-9]*-\d+[a-z]?\d?$')
+
+
+def argv_value(flag):
+    if flag in sys.argv:
+        i = sys.argv.index(flag)
+        if i + 1 >= len(sys.argv) or sys.argv[i + 1].startswith('-'):
+            sys.exit('eta: %s needs a file' % flag)
+        return sys.argv[i + 1]
+    prefix = flag + '='
+    for a in sys.argv:
+        if a.startswith(prefix):
+            v = a[len(prefix):]
+            if not v:
+                sys.exit('eta: %s needs a file' % flag)
+            return v
+    return None
+
+
+def load_mcp(path):
+    """A Linear MCP list_issues payload, or a bare list of those issues."""
+    try:
+        doc = json.load(open(path))
+    except (OSError, ValueError) as ex:
+        sys.exit('eta: cannot read mcp snapshot %s: %s' % (path, ex))
+    if isinstance(doc, list):
+        doc = {'issues': doc}
+    if not isinstance(doc, dict) or not isinstance(doc.get('issues'), list):
+        sys.exit('eta: mcp snapshot must be {"issues": [...]} or a list of issues')
+    if doc.get('hasNextPage'):
+        sys.exit('eta: mcp snapshot is a partial page (hasNextPage true); concatenate every page first')
+    return doc
+
+
+def issue_kind(raw):
+    kind = raw.get('statusType')
+    if not kind and isinstance(raw.get('state'), dict):
+        kind = raw['state'].get('type')
+    if not kind:
+        if raw.get('canceledAt'):
+            return 'canceled'
+        if raw.get('completedAt'):
+            return 'completed'
+        if raw.get('startedAt'):
+            return 'started'
+        return 'unstarted'
+    kind = str(kind).lower()
+    if kind in ('canceled', 'cancelled', 'duplicate'):
+        return 'canceled'
+    if kind == 'completed':
+        return 'completed'
+    if kind == 'started':
+        return 'started'
+    return 'unstarted'
+
+
+def blockers_of(raw):
+    """Blocker identifiers, or None when the snapshot did not carry relations."""
+    if 'blockedBy' in raw and raw['blockedBy'] is not None:
+        out = []
+        for x in raw['blockedBy']:
+            if isinstance(x, str):
+                out.append(x)
+            elif isinstance(x, dict):
+                out.append(x.get('identifier') or x.get('id') or '')
+        return [x for x in out if x]
+    inv = raw.get('inverseRelations')
+    nodes = inv.get('nodes') if isinstance(inv, dict) else inv if isinstance(inv, list) else None
+    if nodes is None:
+        return None
+    out = []
+    for r in nodes:
+        if not isinstance(r, dict) or r.get('type') != 'blocks':
+            continue
+        issue = r.get('issue') or {}
+        ident = issue.get('identifier') or issue.get('id')
+        if ident:
+            out.append(ident)
+    return out
+
+
+def estimate_of(raw):
+    e = raw.get('estimate')
+    if isinstance(e, dict):
+        return e.get('value')
+    if isinstance(e, (int, float)) and not isinstance(e, bool):
+        return e
+    return None
+
+
+def stages_of(open_ids, blockers):
+    """One stage per dependency depth. Tickets with no open blocker share stage 0."""
+    level = {}
+
+    def lvl(t, stack):
+        if t in level:
+            return level[t]
+        if t in stack:
+            sys.exit('eta: dependency cycle: ' + ' -> '.join(list(stack[stack.index(t):]) + [t]))
+        ups = [lvl(b, stack + (t,)) for b in blockers.get(t, []) if b in open_set]
+        level[t] = 1 + max(ups) if ups else 0
+        return level[t]
+
+    open_set = set(open_ids)
+    for t in open_ids:
+        lvl(t, ())
+    if not level:
+        return []
+    return [[t for t in open_ids if level[t] == i] for i in range(max(level.values()) + 1)]
+
+
+def apply_mcp(S, doc):
+    """Replace the schedule with the MCP snapshot. Proposed milestones in S stay. Returns a note or None."""
+    ideas = S.get('ideas') or {}
+    idea_names = {ideas.get('name') or 'Ideas (unscheduled)', 'Ideas (unscheduled)'}
+    idea_lid = ideas.get('linear_milestone_id')
+    seen, rows = set(), []
+    any_blocked = False
+    for raw in doc['issues']:
+        if not isinstance(raw, dict):
+            sys.exit('eta: mcp issue is not an object')
+        ident = str(raw.get('identifier') or raw.get('id') or '')
+        if not IDENT.match(ident):
+            sys.exit('eta: mcp issue has no identifier: %r' % (raw.get('title') or raw.get('id')))
+        if ident in seen:
+            sys.exit('eta: duplicate mcp issue %s' % ident)
+        seen.add(ident)
+        ms = raw.get('projectMilestone') or {}
+        if isinstance(ms, str):
+            ms = {'name': ms}
+        elif not isinstance(ms, dict):
+            ms = {}
+        blocked = blockers_of(raw)
+        if blocked is not None:
+            any_blocked = True
+        rows.append((ident, issue_kind(raw), ms.get('id'), ms.get('name'), blocked, estimate_of(raw)))
+
+    meta = [m for m in (doc.get('milestones') or []) if isinstance(m, dict) and m.get('id')]
+
+    def sort_key(pair):
+        i, m = pair
+        so = m.get('sortOrder')
+        return (so is None, so if so is not None else 0, i)
+
+    meta_sorted = [m for _, m in sorted(enumerate(meta), key=sort_key)]
+    rank = {m['id']: i for i, m in enumerate(meta_sorted)}
+    names = {m['id']: m.get('name') for m in meta_sorted}
+    by_ms, ms_name, loose = {}, {}, []
+    done, inflight = [], {}
+    blockers = {}
+    sizes = dict(S.get('sizes') or {})
+    prev_inf = S.get('inflight') or {}
+    for ident, kind, lid, name, blocked, estv in rows:
+        if lid == idea_lid or name in idea_names:
+            continue
+        if kind == 'canceled':
+            continue
+        if lid:
+            by_ms.setdefault(lid, [])
+            if ident not in by_ms[lid]:
+                by_ms[lid].append(ident)
+            if name:
+                ms_name[lid] = name
+        else:
+            loose.append(ident)
+        if kind == 'completed':
+            done.append(ident)
+        elif kind == 'started':
+            rem = float(prev_inf[ident]['remaining']) if ident in prev_inf and 'remaining' in prev_inf[ident] else 0.5
+            inflight[ident] = dict(prev_inf.get(ident) or {})
+            inflight[ident]['remaining'] = rem
+        if any_blocked:
+            blockers[ident] = list(blocked or [])
+        if estv is not None:
+            sizes[ident] = estv
+    old_by_linear = {m.get('linear_id'): m for m in (S.get('milestones') or []) if m.get('linear_id')}
+    known = [lid for lid in rank if lid in by_ms]
+    unknown = [lid for lid in by_ms if lid not in rank]
+    built = []
+    for lid in known + unknown:
+        old = old_by_linear.get(lid) or {}
+        built.append({'id': old.get('id') or lid, 'name': names.get(lid) or ms_name.get(lid) or old.get('name') or lid,
+                      'linear_id': lid, 'issues': by_ms[lid]})
+    proposed = [m for m in (S.get('milestones') or []) if m.get('proposed')]
+    prop_ids = [t for m in proposed for t in m.get('issues', [])]
+    old_blockers = S.get('blockers') or {}
+    for t in prop_ids:
+        if t in old_blockers:
+            blockers[t] = list(old_blockers[t])
+    S['milestones'] = built + proposed
+    S['done'] = done
+    S['inflight'] = inflight
+    S['sizes'] = sizes
+    S['blockers'] = blockers
+    open_ids = []
+    for m in S['milestones']:
+        for t in m.get('issues', []):
+            if t not in done and t not in open_ids:
+                open_ids.append(t)
+    for t in loose + list(inflight):
+        if t not in done and t not in open_ids:
+            open_ids.append(t)
+    S['stages'] = stages_of(open_ids, blockers)
+    S['queue'] = [t for st in S['stages'] for t in st if t not in inflight]
+    if not any_blocked:
+        return 'mcp snapshot has no blockedBy; open Linear tickets share one stage'
+    return None
+
+
+def find_repo():
+    if os.environ.get('AUTOPILOT_REPO'):
+        return os.environ['AUTOPILOT_REPO']
+    d = os.getcwd()
+    while d != '/':
+        if os.path.exists(os.path.join(d, '.autopilot', 'state.json')):
+            return d
+        d = os.path.dirname(d)
+    sys.exit('eta: no .autopilot/state.json found (set AUTOPILOT_REPO)')
+
+
+M = find_repo()
+S = json.load(open(os.environ.get('ETA_STATE') or os.path.join(M, '.autopilot', 'state.json')))
+WITH_PROPOSALS = False  # a what-if reading: no slip signal, no history (the approved plan is the reference)
+# Proposed milestones (drafted with `bin/milestone add`, not yet approved) show as their own bars, tagged, on a what-if
+# schedule: the owner sees the effect of a milestone the moment it is drafted, not only after approval.
+if S.get('proposed_milestones') and not os.environ.get('ETA_STATE'):
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as _f:
+        _wi = _f.name
+    _r = subprocess.run([os.path.join(os.path.dirname(os.path.realpath(__file__)), 'milestone'), 'whatif', '--out', _wi],
+                        cwd=M, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                        env=dict(os.environ, AUTOPILOT_REPO=M))
+    if _r.returncode == 0:
+        S = json.load(open(_wi))
+        WITH_PROPOSALS = True
+    os.unlink(_wi)
+WITH_MCP = False
+MCP_NOTE = None
+_mcp = argv_value('--from-mcp')
+if _mcp:
+    MCP_NOTE = apply_mcp(S, load_mcp(_mcp))
+    WITH_MCP = True
+SKIP_HISTORY = WITH_PROPOSALS or WITH_MCP or bool(os.environ.get('ETA_STATE'))
+sizes, est = S.get('sizes', {}), S.get('est', {})
+SML = {'XS': 0.5, 'S': 1.0, 'M': 2.0, 'L': 3.0, 'XL': 5.0}
+
+
+def size(t):
+    v = sizes.get(t, 1.0)
+    if isinstance(v, str) and v.strip().upper() in SML:
+        return SML[v.strip().upper()]
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        sys.exit(f'eta: size of {t} is {v!r}: use a number or S/M/L')
+
+
+inflight, done = S.get('inflight', {}), S.get('done', [])
+# Ideas (`bin/idea`) are never scheduled: their milestone and issues stay out of every bar and ETA.
+ideas = S.get('ideas') or {}
+idea_set = set(ideas.get('issues') or [])
+milestones = [dict(m, issues=[t for t in m.get('issues', []) if t not in idea_set]) for m in S.get('milestones') or []
+              if not (m.get('linear_id') and m.get('linear_id') == ideas.get('linear_milestone_id'))]
+raw_queue = [t for t in list(S.get('queue', [])) + [t for m in milestones for t in m.get('issues', [])] if t not in idea_set]
+queue = [t for i, t in enumerate(raw_queue) if t not in inflight and t not in done and t not in raw_queue[:i]]
+now = dt.datetime.now(dt.timezone.utc)
+
+# Measured fallback: minutes of wall time per size unit on one lane, over the recent active window.
+log = subprocess.run(['git', '-C', M, 'log', '--format=%ct %s', S['branch']], capture_output=True, text=True).stdout
+commits = []
+for line in log.splitlines():  # newest first
+    ts, subject = line.split(' ', 1)
+    m = re.search(r'\[([A-Z]+-\d+[a-z]?\d?)\]', subject)
+    if m and m.group(1) in done:
+        commits.append((int(ts), m.group(1)))
+GAP, WINDOW = 3600, 8 * 3600
+active, work, prev = 0.0, 0.0, now.timestamp()
+for ts, t in commits:
+    active += min(prev - ts, GAP)
+    work += size(t)
+    prev = ts
+    if active >= WINDOW:
+        break
+per_unit = (active / 60) / work * float(S.get('parallel', 2)) if work else 60.0
+# A state override wins when the measured window is not representative (new repo, rewritten history).
+if S.get('per_unit_min'): per_unit = float(S['per_unit_min'])
+
+
+def minutes(t):
+    e = est.get(t)
+    if e and t not in inflight:  # not started yet: the full estimate, no countdown
+        return float(e['min'])
+    if e:
+        left = float(e['min']) - (now - dt.datetime.fromisoformat(e['at'])).total_seconds() / 60
+        return max(left, 0.15 * float(e['min']))
+    frac = float(inflight[t].get('remaining', 0.5)) if t in inflight else 1.0
+    return size(t) * frac * per_unit
+
+
+stages, seen = [], set()
+for st in S.get('stages', []):
+    items = [t for t in st if t in inflight or t in queue]
+    if items:
+        stages.append(items)
+        seen.update(items)
+first = [t for t in inflight if t not in seen]
+if first:
+    stages.insert(0, first)
+stages += [[t] for t in queue if t not in seen]
+total, plan = 0.0, []
+item_end = {}  # minutes from now at which each open ticket ends on the stage schedule
+for st in stages:
+    d = max(minutes(t) for t in st)
+    total += d
+    plan.append((st, d))
+    for t in st:
+        item_end.setdefault(t, total)
+# Blockers: a ticket cannot end before its open blockers end plus its own duration (hand-edited stages can disagree).
+blockers = S.get('blockers', {})
+pushed = []
+
+
+def finish(t, seen=()):
+    if t in seen or t not in item_end:
+        return item_end.get(t, 0.0)
+    after = [finish(b, seen + (t,)) for b in blockers.get(t, []) if b in item_end]
+    floor = max(after) + minutes(t) if after else 0.0
+    if floor > item_end[t] + 1:
+        item_end[t] = floor
+        pushed.append(t)
+    return item_end[t]
+
+
+for t in list(item_end):
+    finish(t)
+total_end = max([total] + list(item_end.values()))
+end = (now + dt.timedelta(minutes=total_end)).astimezone()
+
+# Re-plan signals. They print after the ETA line, so `bin/eta | head -1` hides them: run it in full.
+replan = []
+hist_path = os.path.join(M, '.autopilot', 'eta-history.jsonl')
+hist = []
+try:
+    hist = [json.loads(l) for l in open(hist_path) if l.strip()]
+except (OSError, ValueError):
+    pass
+# Slip: compare with the oldest reading taken 60-180 min ago.
+past = [h for h in hist if 60 <= (now - dt.datetime.fromisoformat(h['at'])).total_seconds() / 60 <= 180]
+if past and not SKIP_HISTORY:
+    ref = past[0]
+    slip = (end - dt.datetime.fromisoformat(ref['end'])).total_seconds() / 60
+    if slip > 30:
+        replan.append(f"ETA slipped {slip:+.0f} min since {dt.datetime.fromisoformat(ref['at']).astimezone():%H:%M}: "
+                      "find what added time, then look for work to start in parallel")
+if not SKIP_HISTORY and (not hist or (now - dt.datetime.fromisoformat(hist[-1]['at'])).total_seconds() > 300):
+    try:
+        with open(hist_path, 'a') as f:
+            f.write(json.dumps({'at': now.isoformat(), 'end': end.astimezone(dt.timezone.utc).isoformat(),
+                                'total': round(total)}) + '\n')
+    except OSError:
+        pass
+# Serial tail: consecutive single-item stages. Each must truly depend on the one before it.
+run, worst = [], []
+for st, _ in plan:
+    run = run + [st[0]] if len(st) == 1 else []
+    if len(run) > len(worst):
+        worst = run
+if pushed:
+    replan.append(f"stages out of step with blockers ({', '.join(sorted(set(pushed))[:5])} end after a later stage): "
+                  "run bin/milestone recompute")
+if len(worst) >= 2:
+    replan.append(f"{len(worst)} single-item stages in a row ({' -> '.join(worst)}): "
+                  "check each real dependency; move ordering-only items into an earlier stage")
+# Needless blockers: an open ticket waits on an open ticket that changes none of its files.
+# Three such blockers had kept one ticket in
+# flight for hours; this line names them so the coordinator drops each one (a decision) or says why it stays.
+if not os.environ.get('ETA_STATE'):
+    pairs = lib.needless_blockers(M, blockers, set(queue) | set(inflight), S.get('needs_output'))
+    if pairs:
+        replan.append(f"{len(pairs)} blockers share no file with the ticket they block "
+                      f"({', '.join(f'{t} waits on {b}' for t, b in pairs[:6])}{', ...' if len(pairs) > 6 else ''}): "
+                      "drop each one the ticket does not need the output of (a decision), then bin/milestone recompute; "
+                      "record a pair you keep in state.json needs_output ({ticket: [blockers]}) with its reason in the ticket file")
+# Idle lanes: fewer tickets in flight than the target while work is queued.
+target = int(S.get('parallel_target', 6))
+cores = os.cpu_count() or 1
+load = os.getloadavg()[0] if hasattr(os, 'getloadavg') else 0.0
+if os.environ.get('ETA_LOAD'):  # tests
+    load = float(os.environ['ETA_LOAD'])
+if load > 2 * cores:
+    replan.append(f"machine load {load:.0f} on {cores} cores (over 2x): do not add work; serialise the full "
+                  "suites (implementers run focused tests only) before starting more tickets")
+elif queue and len(inflight) < target:
+    replan.append(f"{len(inflight)} in flight, target {target}, {len(queue)} queued: "
+                  "start an independent ticket, or the independent part of one")
+
+
+
+def progress(items):
+    """(pct, done, inflight, todo) over tickets, size-weighted; in-flight tickets count their done part."""
+    d = [t for t in items if t in done]
+    f = [t for t in items if t in inflight]
+    q = [t for t in items if t not in done and t not in inflight]
+    rem = sum(size(t) * float(inflight[t].get('remaining', 0.5)) for t in f) + sum(size(t) for t in q)
+    got = sum(size(t) for t in d) + sum(size(t) * (1 - float(inflight[t].get('remaining', 0.5))) for t in f)
+    return (got / (got + rem) if got + rem else 1.0), d, f, q
+
+
+def bar(pct, width=30):
+    return '█' * round(pct * width) + '░' * (width - round(pct * width))
+
+
+def spread(m):
+    return max(10, round(m * 0.2))
+
+
+rows = []
+if milestones:
+    groups = [(m.get('id') or m.get('name'), (m.get('name') or m.get('id')) + (' (proposed)' if m.get('proposed') else ''),
+               m.get('linear_id'), list(dict.fromkeys(m.get('issues', []))))
+              for m in milestones]
+    proposed_ids = {m.get('id') for m in milestones if m.get('proposed')}
+    claimed = {t for g in groups for t in g[3]}
+    other = [t for t in list(dict.fromkeys(list(done) + list(inflight) + queue)) if t not in claimed]
+    if other:
+        groups.append(('other', '(no milestone)', None, other))
+    for mid, name, lid, items in groups:
+        pct, d, f, q = progress(items)
+        open_ = [t for t in items if t in item_end]
+        m_end = max([item_end[t] for t in open_] or [0.0])
+        rows.append({'id': mid, 'name': name, 'linear_id': lid, 'pct': round(pct, 4), 'total': len(items), 'done': len(d),
+                     'inflight': len(f), 'todo': len(q), 'status': 'open' if open_ else 'done',
+                     'minutes': round(m_end), 'spread_min': spread(m_end) if open_ else 0,
+                     'end': (now + dt.timedelta(minutes=m_end)).astimezone() if open_ else None,
+                     'proposed': mid in proposed_ids})
+pct = progress(list(dict.fromkeys(list(done) + list(inflight) + queue)))[0]
+alerts = [] if os.environ.get('ETA_STATE') else lib.alerts(M)
+if '--json' in sys.argv:
+    out = {'alerts': [lib.alert_line(a) for a in alerts], 'at': now.astimezone().isoformat(), 'end': end.isoformat(), 'minutes': round(total_end),
+           'spread_min': spread(total_end), 'pct': round(pct, 4), 'done': len(done), 'inflight': len(inflight),
+           'todo': len(queue), 'milestones': [dict(r, end=r['end'] and r['end'].isoformat()) for r in rows],
+           'replan': replan}
+    if WITH_MCP:
+        out['mcp'] = MCP_NOTE
+    print(json.dumps(out, indent=1))
+    sys.exit(0)
+if MCP_NOTE:
+    print('eta: ' + MCP_NOTE, file=sys.stderr)
+for a in alerts:
+    print(lib.alert_line(a))
+if rows:
+    w = max(len(r['name']) for r in rows)
+    for r in rows:
+        when = f"ETA {r['end']:%a %H:%M %Z} (±{r['spread_min']} min)" if r['end'] else 'done'
+        if r.get('proposed'): when += '  (awaiting approval)'
+        print(f"{r['name']:<{w}}  [{bar(r['pct'], 20)}] {r['pct']:.0%}  {r['done']}/{r['total']} done, "
+              f"{r['inflight']} in flight  |  {when}")
+print(f"[{bar(pct)}] {pct:.0%}  {len(done)} done, {len(inflight)} in flight, {len(queue)} to do  |  "
+      f"ETA {end:%a %H:%M %Z} (±{spread(total_end)} min)")
+for r in replan:
+    print(f"REPLAN: {r}")
+if '-v' in sys.argv:
+    t0 = now
+    for st, d in plan:
+        t0 += dt.timedelta(minutes=d)
+        src = ', '.join(f"{t} {minutes(t):.0f}m{'' if t in est else '*'}" for t in st)
+        print(f"  until {t0.astimezone():%H:%M}  {src}")
+    print(f"  (* = measured fallback: {per_unit:.0f} min per size unit over {active / 3600:.1f} active h)")

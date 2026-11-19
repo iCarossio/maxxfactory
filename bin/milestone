@@ -1,0 +1,1041 @@
+#!/usr/bin/env python3
+"""milestone: the major milestones of a project, each with its own progress bar and ETA, in state.json and in Linear.
+
+state.json `milestones` is an ordered list of
+  {"id": "<slug>", "name": "...", "linear_id": "<Linear projectMilestone id>", "issues": ["ENG-1", ...],
+   "added": "<date>", "origin": "plan" | "extension", "premortem": "<path>|null", "plan_review": "<path>|null"}
+and state.json `blockers` ({issue: [issues that block it]}) is the one source of the dependency order: `recompute`
+rebuilds `stages`, `critical_path` and `queue` from the milestone issue lists and the blockers. Blockers may cross
+milestones. A state without `milestones` is one implicit milestone (the whole queue) and `bin/eta` prints its single
+line as before. Ideas (state.json `ideas`, `bin/idea`) are never scheduled: their issues stay out of every scope here
+and their Linear milestone never gets a target date.
+
+  milestone list [--json]               id, name, done/total, ETA (from `bin/eta --json`)
+  milestone seed <tickets.json>         after the plan's `bin/linear import`: one milestone per tickets.json milestone,
+                                        blockers and sizes from the tickets, then recompute (the approved plan: no decision)
+  milestone add <spec.json> [--dry-run] [--planner KEY] [--review-k N]
+                [--skip-premortem "<why>"] [--skip-review "<why>"] [--approved --by <who> --source <kind:ref>]
+  milestone adopt --id ID --name NAME --issues ENG-1,ENG-2,... [--linear-id ID | --create-linear]
+                [--origin plan|extension] [--premortem PATH] [--plan-review PATH] --by <who> --source <kind:ref> [--dry-run]
+  milestone recompute [--from-linear] [--dry-run]
+  milestone sync [--decision D-n]... [--dry-run]
+  milestone tidy [--dry-run]             delete empty milestones the plan dropped, archive empty autopilot projects, sync ticket states
+  milestone proposed [--drop ID]         list (or drop) milestones drafted but not approved; bin/eta shows them
+  milestone whatif --out PATH           state with every proposed milestone added (used by bin/eta)
+
+add: extends a running project with a milestone, in this order, never skipping a step without a logged flag:
+  a. validation (unknown dependencies, cycles, duplicate slugs, a KPI without target or measurement);
+  b. pre-mortem of the milestone delta (`bin/premortem`, the existing PLAN.md as context) into
+     .autopilot/plan/milestones/<id>/premortem.md;
+  c. adversarial plan review of the milestone section (`bin/review`, POOL=plan_review) into .../plan-review.md;
+     b and c run in a detached worktree `.autopilot/review-wt/<id>` (removed afterwards, also on failure),
+     not in the main checkout. The milestone input, PLAN.md text and --out-dir stay absolute paths in the main repo.
+  d. STOP, exit 3: the findings are printed for the owner and coordinator to fold into the spec. A second invocation
+     with --approved --by <who> --source <kind:ref> continues (it stops again if b or c had to run in it);
+  e. `bin/decision add` "milestone <name> added: N tickets", with that source;
+  f. Linear: the projectMilestone, the issues and the blocks relations in the existing project (`bin/linear import`,
+     checkpointed in .../tickets.created.json: a rerun never duplicates);
+  g. the milestone section appended to PLAN.md, state.json updated (milestones, blockers, sizes, then recompute);
+  g2. a spec with "from_ideas" (the skeleton `bin/idea promote` writes into .../milestones/<id>/spec.json): each idea is commented, linked as a duplicate of its
+     new ticket (the tickets carrying its "from_idea", else the first ticket), moved to the Duplicate (else Canceled)
+     state, struck through in the PLAN.md idea backlog and removed from state.json `ideas.issues`;
+  h. `sync` with the decision, PLAN.md pushed as project content, the decision marked synced.
+  Each step is recorded in .../status.json: rerunning the same command resumes after the last completed step.
+  --dry-run validates and prints the stages and per-milestone ETAs the project would have, with no external call.
+  --skip-premortem / --skip-review take the reason, which is written into status.json and the decision.
+  A KPI or plan still marked TODO (a promoted idea's skeleton) is only a warning in --dry-run and refused otherwise.
+
+spec.json:
+  {"id": "whitebox", "name": "Whitebox + PR agents", "description": "one paragraph", "why": "one sentence",
+   "kpis": [{"id": "K1", "kpi": "...", "target": "...", "measure": "command / query / count"}],
+   "plan": "markdown: goal, architecture, rules and guardrails of this milestone",
+   "tickets": [{"slug": "api", "title": "...", "description": "markdown", "estimate": 2 | "M", "priority": 2,
+                "touches": ["api/app.py", "web/src/components/drawer/"],
+                "blocked_by": ["other-slug", "ENG-12", "slug-of-an-existing-ticket"], "labels": [], "from_idea": "ENG-40"}],
+  Ticket shape (refused otherwise): estimate at most M (one concern, about 400 changed lines); `touches` lists
+  the files or modules the ticket changes (max 8); two tickets that can run in parallel never change the same
+  file outside a shared test or docs path (a directory named tests, test, __tests__ or docs at any depth, or a
+  file named *.test.*, *.spec.*, test_*.py or *_test.py). Order them with blocked_by or split by file.
+   "from_ideas": ["ENG-40"]}   (optional: ideas promoted into this milestone, see g2)
+
+adopt: groups tickets that already exist (a project planned before milestones, or a second plan already imported)
+into a milestone: decision logged, then the Linear milestone linked (--linear-id), or created with the issues moved
+into it (--create-linear, checkpointed), or none. Then run `recompute --from-linear` and `sync`.
+
+recompute: blockers are the truth. --from-linear first reloads the blockers (and missing sizes) of every ticket in
+scope from Linear. A state with no `blockers` at all is refused without --from-linear (it would flatten `stages`).
+
+sync: sets each Linear milestone's target date to its ETA, runs tidy, then posts one project update with every
+milestone bar (edits the previous one when it is less than 24 h old). --decision D-n (repeatable) adds that decision
+to the update and marks it synced with the update's url. A tidy that changed something adds one line to that update
+("tidy: 4 empty milestones removed, 1 project archived, 6 states updated"). A later sync that edits the same update
+keeps every prior tidy line, so a heartbeat that changes nothing does not erase the record of deletions and archives.
+
+tidy (also run by sync): 
+  a. deletes this project's milestones that have no issues and are not in state.json `milestones` (matched by
+     linear_id or name). Never the "Ideas (unscheduled)" milestone, never one with any issue.
+  b. archives empty projects this autopilot created for the repo, excluding the current project. Creation is
+     `project_created: true` on `.autopilot/plan/**/tickets.created.json` (that file's `project_id`, or
+     `created_project_id` when a plan was folded into another project), a legacy reserved `pending` project id, or
+     state.json `autopilot_project_ids`. An imported destination (`project_created: false`) is not evidence.
+  c. ticket states follow state.json: `inflight` -> In Progress (else the team's started state), `done` -> Done
+     (completed type), tickets waiting in `queue` or `stages` stay in an unstarted or backlog state. Only a state
+     that differs is written. One line per change. --dry-run prints the same lines with a `would ` prefix and writes
+     nothing.
+
+Linear access: LINEAR_API_KEY, else the file named by state.json `linear_key_file`.
+Exit: 0 ok; 1 invalid input or a failed step (rerun resumes); 2 a review step gave nothing usable (retry later);
+3 needs approval.
+"""
+import argparse, datetime as dt, importlib.machinery, importlib.util, json, os, re, subprocess, sys, tempfile, uuid
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+BIN = lib.HERE
+IDENT = re.compile(r'^[A-Z][A-Z0-9]*-\d+$')
+SLUG = re.compile(r'^[a-z0-9][a-z0-9-]*$')
+SML = {'XS': 0.5, 'S': 1.0, 'M': 2.0, 'L': 3.0, 'XL': 5.0}
+NEEDS_APPROVAL = 3
+
+
+def estimate(t):
+    """A ticket's estimate as Linear takes it (a number), from a number or S/M/L."""
+    u = units(t.get('estimate', 1))
+    return int(u) if u == int(u) else u
+
+
+def units(v):
+    if isinstance(v, str) and v.strip().upper() in SML:
+        return SML[v.strip().upper()]
+    return float(v)
+
+
+def die(msg, code=1):
+    print(f'milestone: {msg}', file=sys.stderr); sys.exit(code)
+
+
+def env(repo):
+    e = dict(os.environ, AUTOPILOT_REPO=repo)
+    key_file = lib.load_state(repo).get('linear_key_file')
+    if not e.get('LINEAR_API_KEY') and key_file and os.path.exists(os.path.expanduser(key_file)):
+        e['LINEAR_API_KEY'] = open(os.path.expanduser(key_file)).read().strip()
+    return e
+
+
+def linear(repo):
+    """bin/linear as a module (its GraphQL helpers), with the API key resolved."""
+    os.environ.update({k: v for k, v in env(repo).items() if k == 'LINEAR_API_KEY'})
+    loader = importlib.machinery.SourceFileLoader('linear_cli', os.path.join(BIN, 'linear'))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader('linear_cli', loader))
+    loader.exec_module(mod)
+    return mod
+
+
+def run(repo, cmd, extra_env=None, capture=True):
+    p = subprocess.run(cmd, capture_output=capture, text=True, env=dict(env(repo), **(extra_env or {})), cwd=repo)
+    return p.returncode, (p.stdout or ''), (p.stderr or '')
+
+
+# ---------- schedule: stages, critical path, queue from milestone issue lists + blockers ----------
+
+def idea_issues(st):
+    return set((st.get('ideas') or {}).get('issues') or [])
+
+
+def scope_of(st):
+    ms = st.get('milestones') or []
+    items = [t for m in ms for t in m.get('issues', [])] + list(st.get('queue', [])) + list(st.get('inflight', {}))
+    if not ms:
+        items = list(st.get('done', [])) + items
+    ideas = idea_issues(st)  # never scheduled, whatever list they slipped into
+    return [t for t in dict.fromkeys(items) if t not in ideas]
+
+
+def find_cycle(nodes, deps):
+    """A dependency cycle among `nodes` as a list, or None."""
+    color, stack = {}, []
+
+    def visit(t):
+        color[t] = 1; stack.append(t)
+        for b in deps.get(t, []):
+            if b not in nodes: continue
+            if color.get(b) == 1: return stack[stack.index(b):] + [b]
+            if not color.get(b):
+                c = visit(b)
+                if c: return c
+        color[t] = 2; stack.pop()
+        return None
+
+    for t in nodes:
+        if not color.get(t):
+            c = visit(t)
+            if c: return c
+    return None
+
+
+def schedule(st):
+    """(stages, critical_path, queue, warnings) for state `st`. Raises ValueError on a cycle."""
+    done, inflight = set(st.get('done', [])), st.get('inflight', {})
+    blockers, sizes = st.get('blockers', {}), st.get('sizes', {})
+    scope = scope_of(st)
+    inset = set(scope)
+    warnings = sorted({f'{t} waits on {b}, outside every milestone and not done: counted as satisfied'
+                       for t in scope for b in blockers.get(t, []) if b not in inset and b not in done})
+    cyc = find_cycle(scope, blockers)
+    if cyc: raise ValueError('dependency cycle: ' + ' -> '.join(cyc))
+    open_ = [t for t in scope if t not in done]
+    level = {}
+
+    def lvl(t):
+        if t not in level:
+            ups = [lvl(b) for b in blockers.get(t, []) if b in inset and b not in done]
+            level[t] = 1 + max(ups) if ups else 0
+        return level[t]
+
+    for t in open_: lvl(t)
+    stages = [[t for t in open_ if level[t] == i] for i in range(max(level.values(), default=-1) + 1)]
+    stages = [s for s in stages if s]
+    queue = [t for s in stages for t in s if t not in inflight]
+    longest = {}
+
+    def chain(t):
+        if t not in longest:
+            ups = [chain(b) for b in blockers.get(t, []) if b in inset]
+            best = max(ups, key=lambda c: c[0], default=(0.0, []))
+            longest[t] = (best[0] + units(sizes.get(t, 1)), best[1] + [t])
+        return longest[t]
+
+    critical = max((chain(t) for t in scope), key=lambda c: c[0], default=(0.0, []))[1]
+    return stages, critical, queue, warnings
+
+
+def apply_schedule(st):
+    stages, critical, queue, warnings = schedule(st)
+    st['stages'], st['critical_path'], st['queue'] = stages, critical, queue
+    return warnings
+
+
+def show_schedule(stages, critical):
+    for i, s in enumerate(stages, 1):
+        print(f'  stage {i}: {", ".join(s)}')
+    print(f'  critical path: {" -> ".join(critical) or "-"}')
+
+
+# ---------- ETA (bin/eta --json is the one implementation) ----------
+
+def eta(repo, state=None):
+    extra = {'ETA_STATE': state} if state else {}
+    rc, out, err = run(repo, [os.path.join(BIN, 'eta'), '--json'], extra)
+    if rc != 0: die(f'bin/eta failed: {err.strip() or out.strip()}')
+    return json.loads(out)
+
+
+def bar(pct, width=20):
+    return '█' * round(pct * width) + '░' * (width - round(pct * width))
+
+
+def when(iso):
+    return 'done' if not iso else dt.datetime.fromisoformat(iso).astimezone().strftime('%a %d %b %H:%M %Z')
+
+
+def bars(e):
+    rows = e['milestones'] or []
+    w = max([len(r['name']) for r in rows] + [7])
+    lines = [f"{r['name']:<{w}}  [{bar(r['pct'])}] {r['pct']:>4.0%}  {r['done']}/{r['total']} done  |  "
+             + (f"ETA {when(r['end'])} (±{r['spread_min']} min)" if r['end'] else 'done') for r in rows]
+    lines.append(f"{'Overall':<{w}}  [{bar(e['pct'])}] {e['pct']:>4.0%}  {e['done']} done, {e['inflight']} in flight, "
+                 f"{e['todo']} to do  |  ETA {when(e['end'])} (±{e['spread_min']} min)")
+    return lines
+
+
+# ---------- spec validation and rendering ----------
+
+def known_slugs(repo, skip=None):
+    """slug -> identifier for every ticket already created from a tickets.json of this project (except under `skip`)."""
+    out, base = {}, os.path.join(repo, '.autopilot')
+    paths = []
+    for root, _, files in os.walk(base):
+        if root == skip: continue
+        if 'tickets.created.json' in files and os.path.relpath(root, base).split(os.sep)[0].startswith('plan'):
+            paths.append(os.path.join(root, 'tickets.created.json'))
+    for p in sorted(paths):
+        try:
+            for slug, v in (lib.read_json(p).get('tickets') or {}).items():
+                if v.get('identifier'): out.setdefault(slug, v['identifier'])
+        except (OSError, ValueError):
+            pass
+    return out
+
+
+def placeholders(spec):
+    """Fields still marked TODO (the skeleton `bin/idea promote` writes): a plan cannot be approved with them."""
+    out = [f'KPI {k.get("id") or "?"} {f}' for k in spec.get('kpis') or [] for f in ('kpi', 'target', 'measure')
+           if str(k.get(f) or '').strip().upper().startswith('TODO')]
+    if str(spec.get('plan') or '').strip().upper().startswith('TODO'): out.append('plan')
+    out += [f'ticket {t.get("slug")} description' for t in spec.get('tickets') or []
+            if str(t.get('description') or '').strip().upper().startswith('TODO')]
+    return out
+
+
+def validate(spec, st, repo, mid):
+    """(errors, blocked_by resolved per slug: new slugs stay slugs, existing tickets become identifiers)."""
+    errs, resolved = [], {}
+    ideas = idea_issues(st)
+    from_ideas = spec.get('from_ideas') or []
+    errs += [f'from_ideas {t!r} is not an idea of this project (bin/idea list)' for t in from_ideas if t not in ideas]
+    errs += [f'{t.get("slug")}: from_idea {t["from_idea"]!r} is not in from_ideas' for t in spec.get('tickets') or []
+             if t.get('from_idea') and t['from_idea'] not in from_ideas]
+    if not (spec.get('name') or '').strip(): errs.append('name is required')
+    if not SLUG.match(mid): errs.append(f'id {mid!r} must be a lowercase slug')
+    if any(m.get('id') == mid for m in st.get('milestones') or []): errs.append(f'milestone id {mid!r} already exists')
+    if any(m.get('name') == spec.get('name') for m in st.get('milestones') or []): errs.append(f'milestone name {spec.get("name")!r} already exists')
+    kpis = spec.get('kpis') or []
+    if not kpis: errs.append('at least one KPI (kpi, target, measure) is required: no milestone without a measurable outcome')
+    for k in kpis:
+        miss = [f for f in ('kpi', 'target', 'measure') if not str(k.get(f) or '').strip()]
+        if miss: errs.append(f'KPI {k.get("id") or k.get("kpi") or "?"} lacks {", ".join(miss)}')
+    tickets = spec.get('tickets') or []
+    if not tickets: errs.append('no tickets')
+    slugs = [t.get('slug') for t in tickets]
+    dup = sorted({s for s in slugs if slugs.count(s) > 1})
+    if dup: errs.append(f'duplicate slugs {dup}')
+    known = known_slugs(repo, skip=os.path.join(repo, '.autopilot', 'plan', 'milestones', mid))
+    scope = set(scope_of(st)) | set(st.get('done', [])) | set(st.get('blockers', {}))
+    if not st.get('blockers') and any(t not in st.get('done', []) for t in scope_of(st)):
+        errs.append('state.json has no `blockers` for the open tickets: the stages could not be recomputed with the new '
+                    'milestone. Load them first: bin/milestone recompute --from-linear')
+    for t in tickets:
+        s = t.get('slug') or ''
+        if not SLUG.match(s): errs.append(f'slug {s!r} must be a lowercase slug')
+        if s in known: errs.append(f'slug {s!r} already names {known[s]}')
+        if not (t.get('title') or '').strip(): errs.append(f'{s}: title is required')
+        try:
+            if units(t.get('estimate', 1)) <= 0: raise ValueError
+        except (TypeError, ValueError):
+            errs.append(f'{s}: estimate {t.get("estimate")!r} is not a number or S/M/L')
+        out = []
+        for b in t.get('blocked_by') or []:
+            if b in slugs: out.append(b)
+            elif IDENT.match(b) and b in scope: out.append(b)
+            elif b in known: out.append(known[b])
+            else: errs.append(f'{s}: blocked_by {b!r} is neither a slug of this spec nor a ticket of the project')
+        resolved[s] = out
+    cyc = find_cycle(slugs, resolved)
+    if cyc: errs.append('dependency cycle: ' + ' -> '.join(cyc))
+    else: errs += lib.ticket_shape_errors(tickets, {s: [b for b in resolved.get(s, []) if b in slugs] for s in slugs})
+    return errs, resolved
+
+
+def cell(s):
+    return ' '.join(str(s or '').split()).replace('|', '\\|') or '-'
+
+
+def render_section(spec, mid, ids=None, meta=None):
+    ids = ids or {}
+    lines = [f'### {spec["name"]} <!-- milestone:{mid} -->', '', spec.get('description', '').strip(), '']
+    if meta: lines += [meta, '']
+    lines += ['| # | KPI / acceptance | Target | How measured |', '|---|---|---|---|']
+    lines += [f'| {cell(k.get("id") or f"K{i}")} | {cell(k["kpi"])} | {cell(k["target"])} | {cell(k["measure"])} |'
+              for i, k in enumerate(spec.get('kpis') or [], 1)]
+    if spec.get('plan'): lines += ['', spec['plan'].strip()]
+    lines += ['', '| slug | issue | title | size | touches | blocked by |', '|---|---|---|---|---|---|']
+    for t in spec['tickets']:
+        deps = ', '.join(ids.get(b, b) for b in t.get('blocked_by') or []) or '-'
+        lines.append(f'| {t["slug"]} | {ids.get(t["slug"], "-")} | {cell(t["title"])} | {cell(t.get("estimate", 1))} | {cell(", ".join(t.get("touches") or []))} | {cell(deps)} |')
+    return '\n'.join(lines).replace('\n\n\n', '\n\n') + '\n'
+
+
+def insert_section(plan_text, mid, section):
+    if f'<!-- milestone:{mid} -->' in plan_text: return plan_text
+    lines = plan_text.splitlines()
+    start = next((i for i, l in enumerate(lines) if l.startswith('## Milestones')), None)
+    if start is not None:
+        end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith('## ')), len(lines))
+    else:
+        end = next((i for i, l in enumerate(lines) if re.match(r'## (Pre-mortem|Decision log|Approval)', l)), len(lines))
+    lines[end:end] = section.rstrip('\n').splitlines() + ['']
+    return '\n'.join(lines) + '\n'
+
+
+def write_text(path, text):
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f: f.write(text)
+    os.replace(tmp, path)
+
+
+def what_if(st, mid, spec, resolved, ids):
+    """A copy of the state with the milestone added (tickets named by `ids`), stages recomputed."""
+    w = json.loads(json.dumps(st))
+    issues = [ids[t['slug']] for t in spec['tickets']]
+    if not w.get('milestones'):
+        w['milestones'] = [{'id': 'current', 'name': w.get('project') or 'Current scope', 'issues': scope_of(w)}]
+    w['milestones'].append({'id': mid, 'name': spec['name'], 'issues': issues})
+    w.setdefault('blockers', {}); w.setdefault('sizes', {})
+    for t in spec['tickets']:
+        w['blockers'][ids[t['slug']]] = [ids.get(b, b) for b in resolved[t['slug']]]
+        w['sizes'][ids[t['slug']]] = units(t.get('estimate', 1))
+    return w
+
+
+# ---------- proposed milestones (visible in bin/eta before approval) ----------
+
+def propose(repo, mid, spec_path, name):
+    """Mark a drafted milestone as proposed: bin/eta shows it (awaiting approval) until it is approved or dropped."""
+    def fn(s):
+        if any(m.get('id') == mid for m in s.get('milestones') or []): return
+        s.setdefault('proposed_milestones', {})[mid] = {'name': name, 'spec': os.path.abspath(spec_path),
+                                                        'at': lib.now().isoformat()}
+    lib.update_state(repo, fn)
+
+
+def whatif_proposed(repo, st):
+    """The state with every proposed milestone added (tickets as +slug), stages recomputed; None without proposals."""
+    props = {k: v for k, v in (st.get('proposed_milestones') or {}).items()
+             if not any(m.get('id') == k for m in st.get('milestones') or [])}
+    if not props: return None
+    w = json.loads(json.dumps(st)); w.pop('proposed_milestones', None)
+    for mid, p in props.items():
+        try: spec = lib.read_json(p['spec'])
+        except (OSError, ValueError): continue
+        status_path = os.path.join(repo, '.autopilot', 'plan', 'milestones', mid, 'status.json')
+        status = lib.read_json(status_path) if os.path.exists(status_path) else {}
+        resolved = status.get('resolved')
+        if not resolved:
+            errs, resolved = validate(spec, st, repo, mid)
+            if errs: continue
+        ids = {t['slug']: '+' + t['slug'] for t in spec['tickets']}
+        w = what_if(w, mid, spec, resolved, ids)
+        w['milestones'][-1]['proposed'] = True
+    apply_schedule(w)
+    return w
+
+
+def cmd_whatif(a):
+    repo = lib.find_repo(); w = whatif_proposed(repo, lib.load_state(repo))
+    if w is None: sys.exit(4)
+    lib.write_json_atomic(a.out, w)
+
+
+def cmd_proposed(a):
+    repo = lib.find_repo()
+    if a.drop:
+        lib.update_state(repo, lambda s: (s.get('proposed_milestones') or {}).pop(a.drop, None)); print(f'dropped {a.drop}'); return
+    for mid, p in (lib.load_state(repo).get('proposed_milestones') or {}).items():
+        print(f"{mid:<16} {p['name']:<40} proposed {p['at'][:16]}  {p['spec']}")
+
+
+# ---------- commands ----------
+
+def cmd_list(a):
+    repo = lib.find_repo(); e = eta(repo)
+    if a.json: print(json.dumps(e['milestones'], indent=1)); return
+    for r in e['milestones'] or []:
+        print(f"{r['id']:<16} {r['name']:<32} {r['done']}/{r['total']} done  "
+              + (f"ETA {when(r['end'])} (±{r['spread_min']} min)" if r['end'] else 'done'))
+    if not e['milestones']:
+        print(f"(no milestones: one implicit scope) {e['done']} done, {e['todo']} to do  ETA {when(e['end'])}")
+
+
+def drop_review_worktree(repo, wt):
+    """Remove a throwaway review worktree. Safe when it is already gone."""
+    if not wt:
+        return
+    subprocess.run(['git', '-C', repo, 'worktree', 'remove', '--force', wt], capture_output=True, text=True)
+    subprocess.run(['git', '-C', repo, 'worktree', 'prune'], capture_output=True, text=True)
+
+
+def ensure_autopilot_ignored(repo):
+    """The review worktree lives under .autopilot/ and must not show up as an untracked tree."""
+    if subprocess.run(['git', '-C', repo, 'check-ignore', '-q', '.autopilot/review-wt'], capture_output=True).returncode == 0:
+        return
+    p = subprocess.run(['git', '-C', repo, 'rev-parse', '--absolute-git-dir'], capture_output=True, text=True)
+    git_dir = (p.stdout or '').strip()
+    if p.returncode != 0 or not git_dir:
+        return
+    excl = os.path.join(git_dir, 'info', 'exclude')
+    os.makedirs(os.path.dirname(excl), exist_ok=True)
+    prev = open(excl).read() if os.path.exists(excl) else ''
+    if '.autopilot/' not in prev.splitlines() and '.autopilot' not in prev.splitlines():
+        if prev and not prev.endswith('\n'):
+            prev += '\n'
+        open(excl, 'w').write(prev + '.autopilot/\n')
+
+
+def make_review_worktree(repo, mid):
+    """Detached checkout at <repo>/.autopilot/review-wt/<id>.
+
+    The pre-mortem and the plan review run here. A file the coordinator writes in the main checkout during
+    the run is then not part of the reviewer's tree, and restoring that tree cannot delete it. premortem
+    reads state.json from --repo, so the main state is copied in; the milestone input, the plan text and
+    --out-dir stay absolute paths in the main repo.
+    """
+    ensure_autopilot_ignored(repo)
+    wt = os.path.join(repo, '.autopilot', 'review-wt', mid)
+    if os.path.lexists(wt):
+        drop_review_worktree(repo, wt)
+    if os.path.lexists(wt):
+        die('review worktree %s already exists and could not be removed' % wt)
+    os.makedirs(os.path.dirname(wt), exist_ok=True)
+    p = subprocess.run(['git', '-C', repo, 'worktree', 'add', '--detach', '--quiet', wt, 'HEAD'],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        drop_review_worktree(repo, wt)
+        die('review worktree: %s' % ((p.stderr or p.stdout or 'git worktree add failed').strip()))
+    try:
+        src = os.path.join(repo, '.autopilot', 'state.json')
+        if os.path.exists(src):
+            os.makedirs(os.path.join(wt, '.autopilot'), exist_ok=True)
+            with open(src) as f, open(os.path.join(wt, '.autopilot', 'state.json'), 'w') as g:
+                g.write(f.read())
+    except BaseException:
+        drop_review_worktree(repo, wt)
+        raise
+    return wt
+
+
+def cmd_add(a):
+    repo = lib.find_repo(); st = lib.load_state(repo)
+    try: spec = lib.read_json(a.spec)
+    except (OSError, ValueError) as ex: die(f'cannot read {a.spec}: {ex}')
+    mid = spec.get('id') or re.sub(r'[^a-z0-9]+', '-', (spec.get('name') or '').lower()).strip('-')
+    d = os.path.join(repo, '.autopilot', 'plan', 'milestones', mid)
+    status_path = os.path.join(d, 'status.json')
+    status = lib.read_json(status_path) if os.path.exists(status_path) else {}
+
+    def save():
+        os.makedirs(d, exist_ok=True); status['at'] = lib.now().isoformat(); lib.write_json_atomic(status_path, status)
+
+    if status.get('synced'):
+        print(f'milestone {mid}: already added ({status.get("decision")}, {status["synced"]})'); return
+    applied = bool(status.get('state'))  # past step g: the milestone is in state.json already
+    if not applied:
+        errs, resolved = validate(spec, st, repo, mid)
+        if errs:
+            for e in errs: print(f'INVALID: {e}')
+            sys.exit(1)
+        status['resolved'] = resolved
+    resolved = status['resolved']
+    if not applied and not a.approved:
+        propose(repo, mid, a.spec, spec['name'])  # bin/eta shows it as proposed until approval or `milestone proposed --drop`
+    if a.dry_run:
+        ids = {t['slug']: '+' + t['slug'] for t in spec['tickets']}
+        w = what_if(st, mid, spec, resolved, ids)
+        try: warnings = apply_schedule(w)
+        except ValueError as ex: die(str(ex))
+        print(f'valid: milestone {spec["name"]!r} ({mid}), {len(spec["tickets"])} tickets, '
+              f'{sum(units(t.get("estimate", 1)) for t in spec["tickets"]):g} size units (new tickets shown as +slug)')
+        for x in placeholders(spec): print(f'  warning: {x} is still TODO: fill it before the real add')
+        show_schedule(w['stages'], w['critical_path'])
+        for x in warnings: print(f'  warning: {x}')
+        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
+            json.dump(w, f)
+        try: e = eta(repo, f.name)
+        finally: os.unlink(f.name)
+        print('ETA with this milestone:')
+        for line in bars(e): print('  ' + line)
+        print('dry run: no pre-mortem, review, decision, Linear, PLAN.md or state change')
+        return
+    if a.approved and not (a.by and a.source): die('--approved needs --by <who> and --source <kind:ref>')
+    todo = [] if applied else placeholders(spec)
+    if todo: die(f'still TODO in {a.spec}: {", ".join(todo)}. Fill them (measurable KPIs, the plan, ticket instructions) first')
+    os.makedirs(d, exist_ok=True)
+    digest = lib.digest_text(json.dumps(spec, sort_keys=True))
+    section = render_section(spec, mid)
+    write_text(os.path.join(d, 'section.md'), section)
+    plan_path = os.environ.get('AUTOPILOT_PLAN') or os.path.join(repo, 'PLAN.md')
+    if not os.path.exists(plan_path): die(f'{plan_path} not found: the milestone section and its decision go there')
+    planner = a.planner or st.get('coordinator')
+    ran_review_now = False
+    # A spec edited before approval (findings folded in) is the expected flow; a spec edited and run again WITHOUT
+    # --approved asks for a new review round of the new delta.
+    stale = not a.approved and status.get('reviewed_digest') not in (None, digest)
+    run_pm = not applied and (stale or not status.get('premortem')) and not a.skip_premortem
+    run_rv = not applied and (stale or not status.get('review')) and not a.skip_review
+    review_wt = None
+    try:
+        if run_pm or run_rv:
+            review_wt = make_review_worktree(repo, mid)
+        if not applied and (stale or not status.get('premortem')):
+            if a.skip_premortem:
+                status['premortem'] = {'skipped': a.skip_premortem}
+            else:
+                if not planner: die('no planner: pass --planner <roster key> or set `coordinator` in state.json')
+                ctx = open(plan_path).read()
+                write_text(os.path.join(d, 'premortem-input.md'),
+                           f'# Pre-mortem scope: milestone "{spec["name"]}", added to a running project\n\n'
+                           'Only the milestone below is under review. The existing plan after the separator is context: it was '
+                           'already pre-mortem\'d and is being executed. Raise a reason about it only when this milestone makes '
+                           'it fail (shared files, a dependency, a KPI it moves, the deadline).\n\n'
+                           f'{section}\n---\n\n# Existing plan (context)\n\n{ctx}')
+                cmd = [os.path.join(BIN, 'premortem'), os.path.join(d, 'premortem-input.md'), '--repo', review_wt,
+                       '--planner', planner, '--out-dir', d]
+                print(f'pre-mortem of milestone {mid} (10-40 min) ...', flush=True)
+                rc, out, err = run(repo, cmd)
+                open(os.path.join(d, 'premortem.log'), 'w').write(out + err)
+                if rc == 2 or not os.path.exists(os.path.join(d, 'premortem.md')):
+                    print(out[-1500:] + err[-500:]); die('pre-mortem gave no usable result (see premortem.log); rerun later', 2)
+                status['premortem'] = {'path': os.path.join(d, 'premortem.md'), 'exit': rc, 'degraded': rc == 1}
+                ran_review_now = True
+            status['reviewed_digest'] = digest; save()
+        if not applied and (stale or not status.get('review')):
+            if a.skip_review:
+                status['review'] = {'skipped': a.skip_review}
+            else:
+                n = status.get('review_round', 0) + 1
+                inp = os.path.join(d, f'review-input-{n}.md')
+                write_text(inp, f'# Milestone {spec["name"]} (extension of a running project)\n\n'
+                                f'Review this milestone plan as an addition to {plan_path} (read it: the existing plan is '
+                                'being executed). Check it fits the existing architecture, tickets and KPIs, that its '
+                                'dependencies on existing tickets are real and complete, and that its KPIs are measurable. '
+                                'Check that every ticket is atomic: one concern, at most about 400 changed lines, a '
+                                '`touches` list that matches what the instructions really change, and no two tickets that '
+                                'can run in parallel changing the same file (including files that tickets already in '
+                                'flight change). A ticket that is too big or shares a hot file is a major finding: name the '
+                                'split.\n\n'
+                                + section)
+                rc, brief, err = run(repo, [os.path.join(BIN, 'mkbrief'), 'plan', f'milestone-{mid}', f'm{n}', inp],
+                                     {'WT': review_wt})  # the brief names the worktree the reviewer reads
+                if rc != 0: die(f'mkbrief failed: {err.strip()}')
+                extra = {'POOL': 'plan_review', 'WT': review_wt}
+                if a.planner and a.planner != st.get('coordinator'):
+                    reg = lib.load_reg(); ad = lib.adapters(); m = reg['models'].get(a.planner) or die(f'unknown planner {a.planner}')
+                    extra['EXCLUDE'] = a.planner; extra['EXCLUDE_VENDOR'] = lib.vendor_of(m, ad.get(m['cli']))
+                print(f'plan review of milestone {mid} ...', flush=True)
+                rc, out, err = run(repo, [os.path.join(BIN, 'review'), f'milestone-{mid}', f'm{n}', brief.strip(), str(a.review_k)], extra)
+                status['review_round'] = n
+                if rc in (2, 3):
+                    print(out[-1500:] + err[-500:]); save(); die('plan review gave no usable verdict; rerun later', 2)
+                path = os.path.join(d, 'plan-review.md')
+                write_text(path, f'# Plan review of milestone {spec["name"]}, round m{n}: '
+                                 f'{"approve" if rc == 0 else "changes required"}\n\n{out}')
+                status['review'] = {'path': path, 'exit': rc, 'verdict': 'approve' if rc == 0 else 'changes_required'}
+                ran_review_now = True
+            status['reviewed_digest'] = digest; save()
+    finally:
+        drop_review_worktree(repo, review_wt)
+    if not applied and (ran_review_now or not a.approved):
+        print(f'NEEDS APPROVAL: milestone {spec["name"]!r} ({mid}), {len(spec["tickets"])} tickets')
+        for k in ('premortem', 'review'):
+            s = status[k]
+            print(f'--- {k}: ' + (f'SKIPPED ({s["skipped"]})' if s.get('skipped') else s['path'] + (' DEGRADED' if s.get('degraded') else '')))
+            if not s.get('skipped'): print(open(s['path']).read().rstrip())
+        print(f'---\nFold the findings into {a.spec} (each accepted reason gets a guardrail with a home: a KPI, a check, a '
+              'ticket, a rule; a rejected one is logged with its evidence), show them to the owner, then rerun with\n'
+              f'  --approved --by <owner> --source user:"<their approval, quoted>"')
+        sys.exit(NEEDS_APPROVAL)
+    # e. decision
+    if not status.get('decision'):
+        skipped = [f'{k} skipped: {status[k]["skipped"]}' for k in ('premortem', 'review') if status[k].get('skipped')]
+        why = '; '.join([spec.get('why') or (spec.get('description') or '').split('. ')[0]] + skipped).strip('; ')
+        rc, out, err = run(repo, [os.path.join(BIN, 'decision'), 'add', '--change', f'milestone {spec["name"]} added: {len(spec["tickets"])} tickets',
+                                  '--source', a.source, '--by', a.by, '--why', why,
+                                  '--affects', ', '.join([mid] + [t['slug'] for t in spec['tickets']] + list(spec.get('from_ideas') or []))])
+        if rc != 0: die(f'decision refused: {err.strip() or out.strip()}')
+        status['decision'] = out.split()[0]; status['approved'] = {'by': a.by, 'source': a.source, 'digest': digest}; save()
+    # f. Linear
+    tickets_path = os.path.join(d, 'tickets.json')
+    if not status.get('linear'):
+        if not st.get('project_id') or st['project_id'].startswith('<') or not st.get('team'):
+            die('state.json has no project_id/team: a milestone extends an existing Linear project')
+        lib.write_json_atomic(tickets_path, {
+            'project': {'name': st.get('project', '')},
+            'milestones': [{'name': spec['name'], 'description': spec.get('description', '')}],
+            'tickets': [dict({k: v for k, v in t.items() if k != 'blocked_by'}, milestone=spec['name'],
+                             estimate=estimate(t),
+                             blocked_by=resolved[t['slug']]) for t in spec['tickets']]})
+        rc, out, err = run(repo, [os.path.join(BIN, 'linear'), 'import', tickets_path, '--team', st['team'], '--project-id', st['project_id']], capture=False)
+        if rc != 0: die('Linear import failed; rerun the same command to resume from the checkpoint')
+        status['linear'] = True; save()
+    created = lib.read_json(os.path.join(d, 'tickets.created.json'))
+    ids = {s: v['identifier'] for s, v in created['tickets'].items()}
+    # g. PLAN.md + state
+    if not status.get('state'):
+        meta = (f'Added {dt.date.today().isoformat()} as an extension ({status["decision"]}). '
+                + ' · '.join(f'{label}: ' + (f'skipped ({status[k]["skipped"]})' if status[k].get('skipped') else f'`{os.path.relpath(status[k]["path"], repo)}`')
+                             for k, label in (('premortem', 'Pre-mortem'), ('review', 'plan review'))))
+        write_text(plan_path, insert_section(open(plan_path).read(), mid, render_section(spec, mid, ids, meta)))
+
+        def fn(s):
+            s.setdefault('milestones', [])
+            if not any(m['id'] == mid for m in s['milestones']):
+                if not s['milestones'] and scope_of(s):
+                    s['milestones'].append({'id': 'current', 'name': s.get('project') or 'Current scope', 'linear_id': None,
+                                            'issues': scope_of(s), 'added': None, 'origin': 'plan',
+                                            'premortem': None, 'plan_review': None})
+                s['milestones'].append({'id': mid, 'name': spec['name'], 'linear_id': created['milestones'].get(spec['name']),
+                                        'issues': [ids[t['slug']] for t in spec['tickets']], 'added': dt.date.today().isoformat(),
+                                        'origin': 'extension', 'premortem': status['premortem'].get('path'),
+                                        'plan_review': status['review'].get('path')})
+            s.setdefault('blockers', {}); s.setdefault('sizes', {})
+            for t in spec['tickets']:
+                s['blockers'][ids[t['slug']]] = [ids.get(b, b) for b in resolved[t['slug']]]
+                s['sizes'][ids[t['slug']]] = units(t.get('estimate', 1))
+            (s.get('proposed_milestones') or {}).pop(mid, None)
+            return apply_schedule(s)
+
+        for x in lib.update_state(repo, fn): print(f'warning: {x}')
+        status['state'] = True; save()
+    # g2. promoted ideas leave the backlog, closed as duplicates of the new tickets
+    for idea in spec.get('from_ideas') or []:
+        if idea in status.setdefault('ideas_closed', []): continue
+        rid = status.setdefault('idea_relations', {}).setdefault(idea, str(uuid.uuid4())); save()
+        close_idea(repo, idea, spec, ids, plan_path, status['decision'], rid)
+        status['ideas_closed'].append(idea); save()
+    # h. Linear content + milestone bars + decision mirrored
+    lin = linear(repo)
+    lin.cmd_project_content([st['project_id'], plan_path])
+    status['synced'] = do_sync(repo, [status['decision']]); save()
+    print(f'milestone {mid} added: {", ".join(ids[t["slug"]] for t in spec["tickets"])} ({status["decision"]}, {status["synced"]})')
+
+
+def close_idea(repo, idea, spec, ids, plan_path, decision, rid):
+    """Idea `idea`, promoted into the milestone of `spec`: duplicate relation to its first new ticket (client id `rid`,
+    checkpointed by the caller), state Duplicate (else the team's first canceled state), a comment, struck through in
+    PLAN.md, out of state.json `ideas.issues`. A rerun after a crash repeats at most the comment."""
+    lin = linear(repo)
+    targets = [ids[t['slug']] for t in spec['tickets'] if t.get('from_idea') == idea] or [ids[spec['tickets'][0]['slug']]]
+    i = lin.issue(idea)
+    lin.retry(lin.relate, i['id'], lin.issue(targets[0])['id'], 'duplicate', rid)
+    lin.retry(lin.update_issue, i['id'], {'stateId': lin.state_id(i['team']['id'], 'Duplicate', 'canceled')})
+    lin.comment(i['id'], f'Promoted into milestone **{spec["name"]}** ({decision}): {", ".join(targets)}. '
+                         'Closed as a duplicate; the work is tracked there.')
+    loader = importlib.machinery.SourceFileLoader('idea_cli', os.path.join(BIN, 'idea'))
+    idea_mod = importlib.util.module_from_spec(importlib.util.spec_from_loader('idea_cli', loader)); loader.exec_module(idea_mod)
+    write_text(plan_path, idea_mod.mark_promoted(open(plan_path).read(), idea, f'promoted to {spec["name"]} ({", ".join(targets)})'))
+
+    def fn(s):
+        lst = (s.get('ideas') or {}).get('issues') or []
+        if idea in lst: lst.remove(idea)
+    lib.update_state(repo, fn)
+    print(f'idea {idea} closed as a duplicate of {targets[0]}')
+
+
+def cmd_seed(a):
+    repo = lib.find_repo()
+    spec = lib.read_json(a.tickets)
+    cpath = a.tickets.rsplit('.', 1)[0] + '.created.json'
+    if not os.path.exists(cpath): die(f'{cpath} not found: create the Linear project first (bin/linear import)')
+    created = lib.read_json(cpath)
+    ids = {s_: v['identifier'] for s_, v in created['tickets'].items()}
+    missing = [t['slug'] for t in spec['tickets'] if t['slug'] not in ids]
+    if missing: die(f'tickets not created in Linear yet: {missing}')
+    pm = os.path.join(repo, '.autopilot', 'plan', 'premortem.md')
+    ms = []
+    for m in spec.get('milestones') or []:
+        mid = m.get('id') or re.sub(r'[^a-z0-9]+', '-', m['name'].lower()).strip('-')
+        ms.append({'id': mid, 'name': m['name'], 'linear_id': created['milestones'].get(m['name']),
+                   'issues': [ids[t['slug']] for t in spec['tickets'] if t.get('milestone') == m['name']],
+                   'added': dt.date.today().isoformat(), 'origin': 'plan', 'premortem': pm if os.path.exists(pm) else None,
+                   'plan_review': None})
+
+    def fn(s):
+        if s.get('milestones'): raise ValueError('state.json already has milestones: use add or adopt')
+        s['milestones'] = ms; s.setdefault('blockers', {}); s.setdefault('sizes', {})
+        for t in spec['tickets']:
+            s['blockers'][ids[t['slug']]] = [ids.get(b, b) for b in t.get('blocked_by') or []]
+            s['sizes'].setdefault(ids[t['slug']], units(t.get('estimate', 1)))
+            if ids[t['slug']] not in s.get('done', []) and ids[t['slug']] not in s.setdefault('queue', []):
+                s['queue'].append(ids[t['slug']])
+        return apply_schedule(s)
+
+    try: warnings = lib.update_state(repo, fn)
+    except ValueError as ex: die(str(ex))
+    for x in warnings: print(f'warning: {x}')
+    s = lib.load_state(repo)
+    print(f'{len(ms)} milestones, {len(spec["tickets"])} tickets')
+    show_schedule(s['stages'], s['critical_path'])
+
+
+def cmd_adopt(a):
+    repo = lib.find_repo(); st = lib.load_state(repo)
+    issues = list(dict.fromkeys(i.strip() for i in a.issues.split(',') if i.strip()))
+    errs = []
+    if not SLUG.match(a.id): errs.append(f'id {a.id!r} must be a lowercase slug')
+    if any(m.get('id') == a.id for m in st.get('milestones') or []): errs.append(f'milestone {a.id} already exists')
+    taken = {t: m['id'] for m in st.get('milestones') or [] for t in m.get('issues', [])}
+    errs += [f'{t} already belongs to milestone {taken[t]}' for t in issues if t in taken]
+    errs += [f'{t} is not an issue identifier' for t in issues if not IDENT.match(t)]
+    errs += [f'{t} is an idea: promote it (bin/idea promote), then bin/milestone add' for t in issues if t in idea_issues(st)]
+    if a.linear_id and a.linear_id == (st.get('ideas') or {}).get('linear_milestone_id'):
+        errs.append('--linear-id is the Ideas milestone: ideas are never scheduled')
+    if not issues: errs.append('no issues')
+    if a.linear_id and a.create_linear: errs.append('--linear-id and --create-linear are exclusive')
+    if errs:
+        for e in errs: print(f'INVALID: {e}')
+        sys.exit(1)
+    if a.dry_run:
+        print(f'valid: milestone {a.name!r} ({a.id}) over {len(issues)} existing tickets; Linear: '
+              + (f'link {a.linear_id}' if a.linear_id else 'create the milestone and move the issues' if a.create_linear else 'none'))
+        return
+    d = os.path.join(repo, '.autopilot', 'plan', 'milestones', a.id); os.makedirs(d, exist_ok=True)
+    cp = os.path.join(d, 'adopt.json')
+    ck = lib.read_json(cp) if os.path.exists(cp) else {'moved': []}
+    if not ck.get('decision'):
+        rc, out, err = run(repo, [os.path.join(BIN, 'decision'), 'add', '--change', f'milestone {a.name} defined over {len(issues)} existing tickets',
+                                  '--source', a.source, '--by', a.by, '--why', a.why or 'group the existing tickets under a major milestone with its own ETA',
+                                  '--affects', ', '.join([a.id] + issues)])
+        if rc != 0: die(f'decision refused: {err.strip() or out.strip()}')
+        ck['decision'] = out.split()[0]; lib.write_json_atomic(cp, ck)
+    lid = a.linear_id
+    if a.create_linear:
+        lin = linear(repo); pid = st.get('project_id') or die('state.json has no project_id')
+        if not ck.get('linear_id'):
+            ck['linear_id'] = ck.get('pending') or str(uuid.uuid4()); ck['pending'] = ck['linear_id']; lib.write_json_atomic(cp, ck)
+            lin.create_milestone(pid, a.name, a.description or '', ck['linear_id'])
+        lid = ck['linear_id']
+        for t in issues:
+            if t in ck['moved']: continue
+            lin.move_issue(t, pid, lid); ck['moved'].append(t); lib.write_json_atomic(cp, ck)
+            print(f'moved {t} into {a.name}')
+
+    def fn(s):
+        s.setdefault('milestones', [])
+        if any(m['id'] == a.id for m in s['milestones']): return
+        s['milestones'].append({'id': a.id, 'name': a.name, 'linear_id': lid, 'issues': issues, 'added': dt.date.today().isoformat(),
+                                'origin': a.origin, 'premortem': a.premortem, 'plan_review': a.plan_review})
+
+    lib.update_state(repo, fn)
+    print(f'milestone {a.id} adopted ({ck["decision"]}). Next: bin/milestone recompute --from-linear --dry-run, then without --dry-run; bin/milestone sync --decision {ck["decision"]}')
+
+
+def cmd_recompute(a):
+    repo = lib.find_repo(); st = lib.load_state(repo)
+    fetched = {}
+    if a.from_linear:
+        lin = linear(repo)
+        for t in scope_of(st):
+            fetched[t] = lin.issue_links(t)
+        print(f'loaded blockers of {len(fetched)} tickets from Linear')
+    elif not st.get('blockers'):
+        die('state.json has no `blockers`: recompute would flatten `stages`. Load them: bin/milestone recompute --from-linear')
+
+    def fn(s):
+        s.setdefault('blockers', {}); s.setdefault('sizes', {})
+        for t, f in fetched.items():
+            s['blockers'][t] = f['blockers']
+            if t not in s['sizes'] and f.get('estimate'): s['sizes'][t] = f['estimate']
+        before = (s.get('stages'), s.get('critical_path'))
+        warnings = apply_schedule(s)
+        return before, warnings
+
+    if a.dry_run:
+        w = json.loads(json.dumps(st)); before, warnings = fn(w); s = w
+    else:
+        try: before, warnings = lib.update_state(repo, fn)
+        except ValueError as ex: die(str(ex))
+        s = lib.load_state(repo)
+    for x in warnings: print(f'warning: {x}')
+    print(f'{len(before[0] or [])} stages -> {len(s["stages"])} stages{" (dry run, not saved)" if a.dry_run else ""}')
+    show_schedule(s['stages'], s['critical_path'])
+
+
+def autopilot_project_ids(repo, st):
+    """Return projects with evidence of creation by this autopilot, never mere import destinations.
+
+    `project_created: true` is that evidence (`bin/linear import`, or the MCP checkpoint documented in
+    maxxfactory-plan step 7). When the plan is folded into another project, `project_id` may name the
+    destination and `created_project_id` keeps the project this autopilot created: only the latter is
+    a candidate. A missing flag still counts for a legacy reserved `pending` project id. `project_created:
+    false` is an imported destination and is ignored.
+    """
+    ids = set(st.get('autopilot_project_ids') or [])
+    base = os.path.join(repo, '.autopilot', 'plan')
+    for root, _, files in os.walk(base):
+        if 'tickets.created.json' not in files:
+            continue
+        try:
+            ck = lib.read_json(os.path.join(root, 'tickets.created.json'))
+        except (OSError, ValueError):
+            continue
+        pid = ck.get('project_id')
+        created_pid = ck.get('created_project_id')
+        reserved = [v for k, v in (ck.get('pending') or {}).items() if k.startswith('project:')]
+        flag = ck.get('project_created')
+        if flag is True:
+            src = created_pid or pid
+            if isinstance(src, str) and src:
+                ids.add(src)
+        elif flag is not False and isinstance(pid, str) and pid in reserved:
+            ids.add(pid)
+    return sorted(x for x in ids if isinstance(x, str) and x and not x.startswith('<'))
+
+
+def tidy_summary(nm, np, ns):
+    ms = 'empty milestone' if nm == 1 else 'empty milestones'
+    pr = 'project' if np == 1 else 'projects'
+    stt = 'state' if ns == 1 else 'states'
+    return 'tidy: %d %s removed, %d %s archived, %d %s updated' % (nm, ms, np, pr, ns, stt)
+
+
+def tidy(repo, dry=False):
+    """Delete empty dropped milestones, archive empty autopilot projects, and move ticket states to match state.json.
+    Returns (summary line, (milestones, projects, states)). Prints one line per change; --dry-run writes nothing."""
+    st = lib.load_state(repo)
+    lin = linear(repo)
+    pid = st.get('project_id')
+    say = lambda msg: print(('would ' if dry else '') + msg)
+    nm = np = ns = 0
+    ideas = st.get('ideas') or {}
+    idea_ids = {ideas.get('linear_milestone_id')} - {None, ''}
+    idea_names = {ideas.get('name') or 'Ideas (unscheduled)', 'Ideas (unscheduled)'}
+    kept_ids = {m.get('linear_id') for m in st.get('milestones') or [] if m.get('linear_id')}
+    kept_names = {m.get('name') for m in st.get('milestones') or [] if m.get('name')}
+    if pid and not str(pid).startswith('<'):
+        for m in lin.milestones_detailed(pid):
+            if m['id'] in idea_ids or m['name'] in idea_names or m['id'] in kept_ids or m['name'] in kept_names or not m['empty']:
+                continue
+            say('remove empty milestone %s (%s)' % (m['name'], m['id']))
+            if not dry:
+                lin.delete_milestone(m['id'])
+            nm += 1
+        for opid in autopilot_project_ids(repo, st):
+            if opid == pid:
+                continue
+            status = lin.project_status(opid)
+            if not status or status['archived'] or status['issues']:
+                continue
+            say('archive project %s' % opid)
+            if not dry:
+                lin.archive_project(opid)
+            np += 1
+        done = set(st.get('done') or [])
+        inflight = set((st.get('inflight') or {}).keys())
+        waiting = set(st.get('queue') or [])
+        for stage in st.get('stages') or []:
+            waiting.update(stage or [])
+        waiting -= done | inflight
+        if st.get('team') and (done or inflight or waiting):
+            states = lin.states_of(lin.team(st['team'])['id'])
+            by_ident = {i['identifier']: i for i in lin.project_issues(pid, with_relations=False)}
+
+            def target(ident):
+                if ident in done:
+                    return lin.pick_state(states, 'Done', 'completed')
+                if ident in inflight:
+                    return lin.pick_state(states, 'In Progress', 'started')
+                cur = (by_ident.get(ident) or {}).get('state') or {}
+                if cur.get('type') in ('unstarted', 'backlog'):
+                    return None
+                return lin.pick_state(states, 'Todo', 'unstarted')
+
+            for ident in sorted(done | inflight | waiting):
+                i = by_ident.get(ident)
+                tgt = target(ident) if i else None
+                if not i or not tgt:
+                    continue
+                cur = i.get('state') or {}
+                if cur.get('id') == tgt['id'] or (cur.get('name') or '').lower() == tgt['name'].lower():
+                    continue
+                say('%s: %s -> %s' % (ident, cur.get('name') or '?', tgt['name']))
+                if not dry:
+                    lin.update_issue(i['id'], {'stateId': tgt['id']})
+                ns += 1
+    line = tidy_summary(nm, np, ns)
+    if nm or np or ns:
+        say(line)
+    return line, (nm, np, ns)
+
+
+def sync_body(e, decisions=(), repo=None):
+    lines = ['**Milestones** (`bin/eta`, ' + dt.datetime.now().astimezone().strftime('%a %d %b %H:%M %Z') + ')', '', '```']
+    lines += bars(e) + ['```']
+    if e.get('replan'): lines += ['', 'Re-plan signals: ' + '; '.join(e['replan'])]
+    if decisions and repo:
+        rc, out, _ = run(repo, [os.path.join(BIN, 'decision'), 'list'])
+        lines.append('')
+        for dn in decisions:
+            row = next((re.sub(r'\s+\[[^\]]*\]\s+', '  ', l, count=1) for l in out.splitlines() if l.startswith(dn + ' ')), dn)
+            lines.append(f'Decision {row}')
+    return '\n'.join(lines) + '\n'
+
+
+def do_sync(repo, decisions=(), dry=False):
+    st = lib.load_state(repo); e = eta(repo)
+    ms = {m['id']: m for m in st.get('milestones') or []}
+    targets = {}
+    for r in e['milestones'] or []:
+        m = ms.get(r['id'])
+        if m and m.get('linear_id') and r['end'] and m['linear_id'] != (st.get('ideas') or {}).get('linear_milestone_id'):
+            date = dt.datetime.fromisoformat(r['end']).date().isoformat()
+            if m.get('target_date') != date: targets[r['id']] = date
+    body = sync_body(e, decisions, repo)
+    n_ideas = len((st.get('ideas') or {}).get('issues') or [])
+    if n_ideas:
+        body += f'\n{(st.get("ideas") or {}).get("name") or "Ideas (unscheduled)"}: {n_ideas} ideas, not scheduled (`bin/idea list`)\n'
+    prev = st.get('milestone_update') or {}
+    line, counts = tidy(repo, dry=dry)
+    # Editing the recent update replaces its whole body. Keep every tidy line already recorded, or the
+    # next unchanged sync is the only Linear copy of those deletions and archives and it erases them.
+    history = [x for x in (prev.get('tidy') or []) if isinstance(x, str) and x.startswith('tidy: ')]
+    if any(counts):
+        history.append(line)
+    if history:
+        body += '\n' + '\n'.join(history) + '\n'
+    fresh = prev.get('id') and (lib.now() - lib.parse_time(prev['at'])).total_seconds() < 24 * 3600
+    if dry:
+        for mid, date in targets.items(): print(f'would set {ms[mid]["name"]} target date {date}')
+        print(('would edit project update ' + prev['id'] if fresh else 'would post a project update') + ':\n' + body)
+        return None
+    lin = linear(repo)
+    for mid, date in targets.items():
+        lin.set_target_date(ms[mid]['linear_id'], date); print(f'{ms[mid]["name"]}: target date {date}')
+    up = lin.upsert_project_update(st['project_id'], body, prev['id'] if fresh else None)
+
+    def fn(s):
+        for m in s.get('milestones') or []:
+            if m['id'] in targets: m['target_date'] = targets[m['id']]
+        s['milestone_update'] = {'id': up['id'], 'url': up.get('url'), 'at': prev['at'] if fresh else lib.now().isoformat(),
+                                 'tidy': history}
+
+    lib.update_state(repo, fn)
+    print(f'project update {"edited" if fresh else "posted"}: {up.get("url")}')
+    for dn in decisions:
+        rc, out, err = run(repo, [os.path.join(BIN, 'decision'), 'synced', dn, up.get('url') or up['id']])
+        if rc != 0: die(f'decision synced {dn} failed: {err.strip()}')
+    return up.get('url') or up['id']
+
+
+def cmd_sync(a):
+    repo = lib.find_repo(); st = lib.load_state(repo)
+    if not st.get('project_id') or st['project_id'].startswith('<'): die('state.json has no project_id')
+    do_sync(repo, a.decision or [], a.dry_run)
+
+
+def cmd_tidy(a):
+    repo = lib.find_repo(); st = lib.load_state(repo)
+    if not st.get('project_id') or st['project_id'].startswith('<'): die('state.json has no project_id')
+    line, counts = tidy(repo, dry=a.dry_run)
+    if a.dry_run or not any(counts):
+        return
+    linear(repo).upsert_project_update(st['project_id'], line + '\n')
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ('-h', '--help'): print(__doc__); sys.exit(0 if len(sys.argv) > 1 else 1)
+    p = argparse.ArgumentParser(prog='milestone'); sub = p.add_subparsers(dest='cmd')
+    li = sub.add_parser('list'); li.add_argument('--json', action='store_true')
+    ad = sub.add_parser('add'); ad.add_argument('spec'); ad.add_argument('--dry-run', action='store_true')
+    ad.add_argument('--planner'); ad.add_argument('--review-k', type=int, default=1)
+    ad.add_argument('--skip-premortem', metavar='WHY'); ad.add_argument('--skip-review', metavar='WHY')
+    ad.add_argument('--approved', action='store_true'); ad.add_argument('--by'); ad.add_argument('--source')
+    se = sub.add_parser('seed'); se.add_argument('tickets')
+    ao = sub.add_parser('adopt'); ao.add_argument('--id', required=True); ao.add_argument('--name', required=True)
+    ao.add_argument('--issues', required=True); ao.add_argument('--linear-id'); ao.add_argument('--create-linear', action='store_true')
+    ao.add_argument('--description'); ao.add_argument('--why')
+    ao.add_argument('--origin', choices=('plan', 'extension'), default='plan'); ao.add_argument('--premortem'); ao.add_argument('--plan-review')
+    ao.add_argument('--by', required=True); ao.add_argument('--source', required=True); ao.add_argument('--dry-run', action='store_true')
+    wi = sub.add_parser('whatif'); wi.add_argument('--out', required=True)
+    pr = sub.add_parser('proposed'); pr.add_argument('--drop')
+    rc = sub.add_parser('recompute'); rc.add_argument('--from-linear', action='store_true'); rc.add_argument('--dry-run', action='store_true')
+    sy = sub.add_parser('sync'); sy.add_argument('--decision', action='append'); sy.add_argument('--dry-run', action='store_true')
+    ty = sub.add_parser('tidy'); ty.add_argument('--dry-run', action='store_true')
+    a = p.parse_args()
+    if a.cmd == 'add' and any(x is not None and not x.strip() for x in (a.skip_premortem, a.skip_review)):
+        die('--skip-premortem / --skip-review need the reason')
+    {'list': cmd_list, 'seed': cmd_seed, 'add': cmd_add, 'adopt': cmd_adopt, 'recompute': cmd_recompute, 'sync': cmd_sync,
+     'tidy': cmd_tidy, 'whatif': cmd_whatif, 'proposed': cmd_proposed}[a.cmd](a)
+
+
+if __name__ == '__main__':
+    main()

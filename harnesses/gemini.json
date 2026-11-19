@@ -1,0 +1,36 @@
+{
+  "name": "gemini",
+  "binary": "gemini",
+  "vendor": "google",
+  "doc": "Google Gemini CLI. Untested in the pools so far: smoke it before adding it to a pool.",
+  "run": {
+    "argv": [
+      "-p",
+      "{prompt}",
+      "-m",
+      "{model}",
+      "--yolo"
+    ],
+    "env": {},
+    "output": "stdout"
+  },
+  "list_models": {
+    "kind": "none"
+  },
+  "usage": {
+    "kind": "none",
+    "note": "see /stats in an interactive session"
+  },
+  "quota_patterns": [
+    "quota",
+    "rate limit",
+    "429"
+  ],
+  "tokens": {
+    "kind": "gemini_chats",
+    "path": "~/.gemini/tmp",
+    "note": "chat recordings under ~/.gemini/tmp/<project>/chats; untested, check the first numbers against /stats"
+  },
+  "coordinator_env": [],
+  "coordinator_env_doc": "variables this CLI sets in the processes it starts: when one is set, the coordinator session runs on this CLI, on the account its account_env names in this process (unset = default home). AUTOPILOT_COORDINATOR=<cli>[/<account>] overrides."
+}

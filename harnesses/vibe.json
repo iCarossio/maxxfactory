@@ -1,0 +1,36 @@
+{
+  "name": "vibe",
+  "binary": "vibe",
+  "vendor": "mistral",
+  "doc": "Mistral Vibe: `--model <alias>` picks the model (aliases come from Mistral's server-side catalog, e.g. mistral-large-4-0-3 = Mistral Large 4 \"Le Chonk\"; an unknown alias exits with the available list). No local sandbox (the two flags below are full access).",
+  "run": {
+    "argv": [
+      "-p",
+      "{prompt}",
+      "--model",
+      "{model}",
+      "--auto-approve",
+      "--trust"
+    ],
+    "env": {},
+    "output": "stdout"
+  },
+  "list_models": {
+    "kind": "none"
+  },
+  "usage": {
+    "kind": "vibe_billing",
+    "note": "monthly Vibe budget and plan from Mistral's billing API (/v1/billing/budget, /v1/billing/subscription) through Vibe's own Python and sign-in; no model call",
+    "window": "monthly"
+  },
+  "quota_patterns": [
+    "quota",
+    "rate limit"
+  ],
+  "tokens": {
+    "kind": "none",
+    "note": "Mistral Vibe keeps no token counts in its session store (only the context size); see /usage in an interactive session"
+  },
+  "coordinator_env": [],
+  "coordinator_env_doc": "variables this CLI sets in the processes it starts: when one is set, the coordinator session runs on this CLI, on the account its account_env names in this process (unset = default home). AUTOPILOT_COORDINATOR=<cli>[/<account>] overrides."
+}

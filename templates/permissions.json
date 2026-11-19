@@ -1,0 +1,41 @@
+{
+  "_comment": "Permission rules the autopilot needs to run unattended. Setup step 0 merges them into ~/.claude/settings.json (permissions.allow) with the user's approval, along with any project-specific test/build commands (e.g. npm test, pytest, make). Each harness script is listed under both path spellings (~ and the absolute home; init replaces {HOME} with the user's home, since rules do not expand $HOME), because rules match the start of the command line. Never add rules for actions that need a per-use owner decision: publishing a website, merging to the default branch, opening a PR, deleting branches or worktrees, paying for credits. Redeeming a free Codex usage reset (codex-reset) is not one: the owner authorized it durably (models.json codex_auto_reset), and run-model calls it unattended.",
+  "permissions": {
+    "allow": [
+      "Bash(~/.claude/skills/maxxfactory-run/bin/run-model *)",
+      "Bash({HOME}/.claude/skills/maxxfactory-run/bin/run-model *)",
+      "Bash(~/.claude/skills/maxxfactory-run/bin/review *)",
+      "Bash({HOME}/.claude/skills/maxxfactory-run/bin/review *)",
+      "Bash(~/.claude/skills/maxxfactory-run/bin/mkbrief *)",
+      "Bash({HOME}/.claude/skills/maxxfactory-run/bin/mkbrief *)",
+      "Bash(~/.claude/skills/maxxfactory-run/bin/finish *)",
+      "Bash({HOME}/.claude/skills/maxxfactory-run/bin/finish *)",
+      "Bash(~/.claude/skills/maxxfactory-run/bin/rebase-wt *)",
+      "Bash({HOME}/.claude/skills/maxxfactory-run/bin/rebase-wt *)",
+      "Bash(~/.claude/skills/maxxfactory-run/bin/state *)",
+      "Bash({HOME}/.claude/skills/maxxfactory-run/bin/state *)",
+      "Bash(~/.claude/skills/maxxfactory-run/bin/eta *)",
+      "Bash({HOME}/.claude/skills/maxxfactory-run/bin/eta *)",
+      "Bash(~/.claude/skills/maxxfactory-run/bin/linear *)",
+      "Bash({HOME}/.claude/skills/maxxfactory-run/bin/linear *)",
+      "Bash(~/.claude/skills/maxxfactory-run/bin/codex-reset *)",
+      "Bash({HOME}/.claude/skills/maxxfactory-run/bin/codex-reset *)",
+      "Bash(~/.claude/skills/maxxfactory-run/bin/alert *)",
+      "Bash({HOME}/.claude/skills/maxxfactory-run/bin/alert *)",
+      "Bash(~/.claude/skills/maxxfactory-run/bin/docker-up *)",
+      "Bash({HOME}/.claude/skills/maxxfactory-run/bin/docker-up *)",
+      "Bash(~/.claude/skills/maxxfactory-run/bin/docker-reap *)",
+      "Bash({HOME}/.claude/skills/maxxfactory-run/bin/docker-reap *)",
+      "Bash(git worktree add *)",
+      "Bash(git push origin autopilot/*)",
+      "Bash(docker ps *)",
+      "Bash(docker inspect *)",
+      "Bash(caffeinate *)",
+      "mcp__claude_ai_Linear__save_comment",
+      "mcp__claude_ai_Linear__save_issue",
+      "mcp__claude_ai_Linear__get_issue",
+      "mcp__claude_ai_Linear__list_issues",
+      "mcp__claude_ai_Linear__list_comments"
+    ]
+  }
+}

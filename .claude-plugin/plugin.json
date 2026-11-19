@@ -1,0 +1,18 @@
+{
+  "name": "maxxfactory",
+  "version": "0.3.0",
+  "description": "A lights-out software factory for AI coding agents. Flagship models plan a Linear project adversarially (pre-mortem by another vendor), cheaper models build it ticket by ticket, another model inspects every round until it converges. Runs unattended for hours on the subscriptions you already pay for: every quota used before its reset, credits never bought, no token spent twice. Works with Claude Code, Codex, opencode, pi, Grok, Antigravity, Mistral Vibe.",
+  "author": {
+    "name": "Antoine Carossio"
+  },
+  "keywords": [
+    "tokenmaxxing",
+    "autonomous-agents",
+    "multi-model",
+    "code-review",
+    "linear",
+    "claude-code",
+    "codex",
+    "pre-mortem"
+  ]
+}
