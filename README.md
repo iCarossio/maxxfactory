@@ -47,10 +47,12 @@ The default tier table (`DEFAULT_TIER_TABLE` in `bin/autopilot_lib.py`, overrida
 | Tier | Examples | Role |
 |---|---|---|
 | 0 frontier | Claude Fable, GPT-6 Astra, Gemini 4 Carbon | never automatic; only with `--allow-tier0` |
-| 1 flagship | Claude Opus, GPT-6.1 Sol, Gemini 4 Argon, GLM-5.3, Kimi K3, Qwen 3.8 Max, DeepSeek V4.1 Pro | coordination, plan reviews, pre-mortems, milestone reviews; backup code reviewer |
-| 2 balanced | Claude Sonnet, GPT-6.1 Terra, Gemini 3.8 Flash, Grok 4.7, DeepSeek V4.1 Flash, Qwen 3.8 Flash, GLM-5.3 Flash | implement and review tickets (never the same model on one ticket) |
-| 3 fast | Claude Haiku, GPT-6 Luna, Gemini 3.5 Flash-Lite | implementation, only in a project pinned to it |
-| 4 small | Mistral, free models | trivial tasks only |
+| 1 flagship | Claude Opus, GPT-6.1 Sol, Gemini 4 Argon, GLM-5.3, Kimi K3, Qwen 3.8 Max, DeepSeek V4 Pro, Muse Spark | coordination, plan reviews, pre-mortems, milestone reviews; backup code reviewer |
+| 2 balanced | Claude Sonnet, GPT-6.1 Terra, Gemini 4 Hydrogen, Gemini 3.8 Flash, Grok 4.7, Mistral Large 4 ("Le Chonk", through Vibe), DeepSeek V4.1 Flash, Qwen 3.8 Flash and Plus, GLM-5.3 Flash (paid ids, e.g. OpenCode Go) | implement and review tickets (never the same model on one ticket) |
+| 3 fast | Claude Haiku, GPT-6 Luna, Gemini Flash-Lite | implementation, only in a project pinned to it |
+| 4 small and free | the free models of opencode and OpenRouter: Poolside Laguna, NVIDIA Nemotron (Super, Ultra, Lightning, Nano), Xiaomi MiMo Flash, Google Gemma 4, Inkling, LongCat, Hy4 Flash, Flint, Ling, ERNIE Flash, Beam, the `-free` ids of DeepSeek and GLM, `openrouter/free`; every Mistral model but Large; Gemini older than 3.5 | trivial tasks only |
+
+A model's tier comes from the first matching row of `DEFAULT_TIER_TABLE`; any model id with `free` in it (`opencode/*-free`, OpenRouter `:free`) is Tier 4 whatever the table says. To trust one above its tier (e.g. a free model you want as a Tier 2 reviewer), set `owner_tier` on its roster entry with your reason: it then keeps its `level`, and `no_implement` limits it to reviews.
 
 Rules enforced in code:
 

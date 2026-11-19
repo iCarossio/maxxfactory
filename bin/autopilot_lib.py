@@ -578,7 +578,7 @@ DEFAULT_TIER_TABLE = [
     {'match': r'claude-opus', 'level': 1}, {'match': r'gpt-[\d.]+-sol', 'level': 1}, {'match': r'gemini-[\d.]+-argon', 'level': 1},
     {'match': r'muse-spark', 'level': 1}, {'match': r'kimi-k\d', 'level': 1},
     {'match': r'qwen[\d.]+-max', 'level': 1}, {'match': r'deepseek-v[\d.]+-pro', 'level': 1},
-    {'match': r'claude-sonnet', 'level': 2}, {'match': r'gpt-[\d.]+-terra', 'level': 2}, {'match': r'gemini-3\.8-flash(?!-lite)', 'level': 2}, {'match': r'gemini-[\d.]+-hydrogen', 'level': 2},
+    {'match': r'claude-sonnet', 'level': 2}, {'match': r'mistral-large-[\d-]+', 'level': 2, 'why': 'Mistral Large 4 ("Le Chonk") on Vibe: the one Mistral model above Tier 4'}, {'match': r'gpt-[\d.]+-terra', 'level': 2}, {'match': r'gemini-3\.8-flash(?!-lite)', 'level': 2}, {'match': r'gemini-[\d.]+-hydrogen', 'level': 2},
     {'match': r'grok-4\.7', 'level': 2}, {'match': r'grok-4\.3', 'level': 2}, {'match': r'qwen[\d.]+-plus', 'level': 2},
     {'match': r'opencode-go/deepseek-v[\d.]+-flash', 'level': 2, 'why': 'OpenCode Go DeepSeek Flash is Tier 2; the free id stays Tier 4'},
     {'match': r'deepseek-v[\d.]+-flash|glm-[\d.]+-flash|qwen[\d.]+-flash', 'level': 2, 'why': 'the Max, Pro and plain GLM models are Tier 1, their Flash models Tier 2 (free ids stay Tier 4)'},
@@ -626,6 +626,9 @@ def table_level(r, model_id):
     return None, None
 
 
+MISTRAL_ABOVE_FOUR = re.compile(r'mistral-large', re.I)  # Mistral Large 4 is Tier 2; every other Mistral model Tier 4
+
+
 def forced_four(m, a=None):
     """Why the owner's rule puts this entry at Tier 4 whatever its level says, or None.
 
@@ -634,7 +637,7 @@ def forced_four(m, a=None):
     """
     if m.get('owner_tier'):
         return None
-    if vendor_of(m, a) == 'mistral':
+    if vendor_of(m, a) == 'mistral' and not MISTRAL_ABOVE_FOUR.search(str(m.get('model', ''))):
         return 'Mistral model'
     if is_free_model(m):
         return 'free model'

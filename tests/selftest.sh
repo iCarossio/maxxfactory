@@ -171,6 +171,7 @@ check "a free model added with --level 2 is Tier 4: never a reviewer" "$(POOL re
 check "Tier 4 only in trivial" "$(POOL trivial) $(for p in implement fix review plan_review premortem milestone_review escalate; do POOL $p; done | grep -c fk-e)" '["fk-e"] 0'
 $H/bin/harness add-model fk-m --cli vibe --model mistral-x --level 2 >/dev/null
 check "a Mistral model is Tier 4 whatever its level" "$(POOL trivial | SORTED) $(POOL review | grep -c fk-m)" "['fk-e', 'fk-m'] 0"
+check "Mistral Large is Tier 2 (tier table)" "$(python3 -c "import sys;sys.path.insert(0,'$H/bin');import autopilot_lib as l;print(l.table_level({},'mistral-large-4-0-3')[0], l.forced_four({'cli':'vibe','model':'mistral-large-4-0-3','vendor':'mistral'}), l.forced_four({'cli':'vibe','model':'mistral-medium-3.5','vendor':'mistral'}))")" "2 None Mistral model"
 $H/bin/harness add-model fk-z --cli claude --model claude-mythos-x --level 0 >/dev/null
 check "Tier 0 never in a pool" "$(for p in implement fix review plan_review premortem milestone_review escalate trivial coordinate; do POOL $p; done | grep -c fk-z)" "0"
 $H/bin/run-model run review "$PB" .autopilot/out/p.md --cwd "$PWD" --pool plan_review --model fk-z >/dev/null 2>&1; check "Tier 0 by --model without --allow-tier0 refused" "$?" "4"
