@@ -14,7 +14,7 @@ model's CLI, stores the full output in a file and prints ONE json line.
   run-model reset <KEY>                 # clear a cooldown
   run-model wait <ROLE> [EXCLUDE,...] [--vendors N]   # block until the role has N healthy vendors, print the keys
   run-model usage [--apply]             # exact quota + reset times per harness and account; --apply cools exhausted models until their reset,
-                                        # claims a Codex weekly reset first (models.json codex_auto_reset), records the credit left per account
+                                        # claims a weekly reset first (Codex, Claude; models.json <cli>_auto_reset), records the credit left per account
                                         # (weights of the draws), runs `discover --apply` once a day, and raises CRITICAL alerts
   run-model status [--json]    # every configured model: subscription and, per window (short-term, weekly, monthly), percent used and reset
   run-model alerts                      # recompute the CRITICAL alerts now (bin/alert lists and acknowledges them)
@@ -48,9 +48,9 @@ Hard rules enforced here:
 
 Quota:
 - an account whose WEEKLY window is exhausted (fresh reading, `usage --apply` or a quota error in a run) gets its usage reset
-  claimed automatically through the adapter's `auto_reset` (bin/codex-reset --yes), once per account per weekly window,
-  then one of its models is smoke-tested and its cooldowns are cleared; `"codex_auto_reset": false` in models.json turns
-  it off. A 5-hour limit alone never triggers it;
+  claimed automatically through the adapter's `auto_reset` (bin/codex-reset --yes, bin/claude-reset --yes: a free reset
+  only, never a paid option), once per account per weekly window, then one of its models is smoke-tested and its
+  cooldowns are cleared; `"codex_auto_reset": false` (or `claude_auto_reset`) in models.json turns it off. A 5-hour limit alone never triggers it;
 - a reading older than a successful run or smoke of the account is stale: never re-applied as a cooldown;
 - a vendor down on every account (or plan_review/premortem without an eligible model) after that is a CRITICAL alert:
   `CRITICAL:` on stderr, `.autopilot/alerts.jsonl`, a Linear project update; the coordinator tells the owner at once.
@@ -934,8 +934,9 @@ def mark_stale(r, ad, entry):
     return out
 
 
-def auto_reset_enabled(r):
-    return r.get('codex_auto_reset', True) and os.environ.get('AUTOPILOT_NO_AUTORESET') != '1'
+def auto_reset_enabled(r, cli='codex'):
+    """models.json `<cli>_auto_reset` (codex_auto_reset, claude_auto_reset), on by default."""
+    return r.get('%s_auto_reset' % cli, True) and os.environ.get('AUTOPILOT_NO_AUTORESET') != '1'
 
 
 def claim_reset(entry, ad):
@@ -948,13 +949,13 @@ def claim_reset(entry, ad):
     if not spec:
         return None
     win = spec.get('window', 'weekly')
-    w = next((w for w in entry['windows'] if w.get('window') == win and w.get('used') is not None and w['used'] >= 100
+    w = next((w for w in entry['windows'] if re.fullmatch(win, w.get('window') or '', re.I) and w.get('used') is not None and w['used'] >= 100
               and not w.get('stale') and w.get('reset') and lib.parse_time(w['reset']) > now()), None)
     if not w:
         return None
     acct = '%s/%s' % (entry['cli'], entry['account'])
     r = lib.load_reg()
-    if not auto_reset_enabled(r):
+    if not auto_reset_enabled(r, entry['cli']):
         return {'account': acct, 'result': 'disabled'}
     prev = r.get('resets', {}).get(acct)
     if prev and abs((lib.parse_time(prev['window_reset']) - lib.parse_time(w['reset'])).total_seconds()) < 12 * 3600:
@@ -983,7 +984,7 @@ def claim_reset(entry, ad):
             rec['result'] = 'redeemed, smoke ok (%s), cooldowns cleared' % keys[0]
         else:
             rec['result'] = 'redeemed, smoke failed (%s: %s)' % (keys[0] if keys else '-', sm.get('status'))
-    elif re.search(r'redeem menu did not appear|no reset', text, re.I):
+    elif re.search(r'redeem menu did not appear|no reset', text, re.I):  # codex-reset, claude-reset ('no reset offered')
         rec['result'] = 'no reset available: ' + last
     elif code == 3:
         rec['result'] = 'refused: ' + last
@@ -1002,8 +1003,8 @@ def reset_note(r, ad, acct):
     cli = acct.split('/', 1)[0]
     if not (ad.get(cli) or {}).get('auto_reset'):
         return 'no reset mechanism for this harness'
-    if not auto_reset_enabled(r):
-        return 'auto-reset disabled (models.json codex_auto_reset)'
+    if not auto_reset_enabled(r, cli):
+        return 'auto-reset disabled (models.json %s_auto_reset)' % cli
     rec = r.get('resets', {}).get(acct)
     if rec:
         return '%s (%s)' % (rec['result'], rec['at'][:16])

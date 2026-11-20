@@ -148,6 +148,13 @@ $H/bin/alert ack all >/dev/null 2>&1
 printf '#!/bin/sh\necho "${FAKE_MD_COUNT:-0}"\n' > $SCR/mdfind; chmod +x $SCR/mdfind; mkdir -p $SCR/sp; touch $SCR/sp/f
 check "spotlight: indexed tree -> SPOTLIGHT line, exit 1" "$(AUTOPILOT_MDFIND=$SCR/mdfind FAKE_MD_COUNT=7 $H/bin/spotlight check $SCR/sp | grep -c 'SPOTLIGHT: .*indexed (7 items)') $(AUTOPILOT_MDFIND=$SCR/mdfind FAKE_MD_COUNT=7 $H/bin/spotlight check $SCR/sp >/dev/null; echo $?)" "1 1"
 check "spotlight: excluded tree -> exit 0" "$(AUTOPILOT_MDFIND=$SCR/mdfind FAKE_MD_COUNT=0 $H/bin/spotlight check $SCR/sp >/dev/null; echo $?)" "0"
+check "credit: a usage reading scoped by window_groups does not weight other models of the account" "$(python3 -c "
+import sys; sys.path.insert(0,'$H/bin'); import autopilot_lib as l
+a={'usage':{'window_groups':{'.':'^opencode-go/'}}}
+print(l.usage_applies({'model':'opencode-go/glm-5.3'},a), l.usage_applies({'model':'zai-coding-plan/glm-5.3'},a), l.usage_applies({'model':'x'},{}))")" "True False True"
+check "claude auto-reset window: all-models week only" "$(python3 -c "
+import json,re; w=json.load(open('$H/harnesses/claude.json'))['auto_reset']['window']
+print(*[bool(re.fullmatch(w,x,re.I)) for x in ('Current week (all models)','Current week (Fable)','Current session')])")" "True False False"
 
 echo "--- premortem"
 OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a); RC=$?; check "premortem default k=1: fk-b alone, both passes -> 0" "$RC" "0"

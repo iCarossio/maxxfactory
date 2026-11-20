@@ -23,7 +23,7 @@ Show the table as printed, then at most three lines: any window at 90% or more w
 
 | Command | Does |
 |---|---|
-| `bin/run-model usage --apply` | Reads every probe, cools down each model whose window is at 100% until its exact reset, clears stale cooldowns, claims a free Codex weekly reset when one is due (`codex_auto_reset`), ends with the CRITICAL check. Run by `/maxxfactory-run` on every heartbeat. |
+| `bin/run-model usage --apply` | Reads every probe, cools down each model whose window is at 100% until its exact reset, clears stale cooldowns, claims a free Codex or Claude weekly reset when one is due (`codex_auto_reset`, `claude_auto_reset`), ends with the CRITICAL check. Run by `/maxxfactory-run` on every heartbeat. |
 | `bin/run-model health` | Current cooldowns: key, until, reason. `bin/run-model reset <key>` then `smoke <key>` clears one the user says is stale. |
 | `bin/harness check` | Per role: candidates with tier, account, subscription, health, credit left; then what is missing. |
 | `bin/alert list` / `ack <ID\|all>` | CRITICAL alerts (a vendor out of quota everywhere, a role with no eligible model). Report any unacknowledged one first. |

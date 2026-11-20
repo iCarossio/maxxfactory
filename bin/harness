@@ -343,7 +343,7 @@ def summary(r, ad):
             hl = 'cool until %s' % lib.parse_time(h['until']).astimezone().strftime('%d %H:%M') if h and lib.parse_time(h['until']) > nowt else 'ok'
             coord = lib.on_coordinator_account(r, m, a)
             sub = (m.get('subscription') or 'paid?') + (' COORDINATOR: last resort%s' % ('' if role in lib.CHEAP_ROLES else ', only if nothing else') if coord else '')
-            left = lib.credit_left(r, lib.account_key(m, a))
+            left = lib.credit_left(r, lib.account_key(m, a)) if lib.usage_applies(m, a) else None
             lines.append('    %-22s %-34s %-10s %-30s %-30s %s%s' % (k, m['model'][:34], lib.vendor_of(m, a), (m.get('account_label') or lib.account_of(m, a))[:30],
                                                          (sub + (' ' + m['plan'] if m.get('plan') else ''))[:30], hl,
                                                          '' if left is None else ', %d%% left' % round(left * 100)))

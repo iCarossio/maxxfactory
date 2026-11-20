@@ -28,6 +28,7 @@ You are the **coordinator**. You read the Linear project, write briefs, dispatch
 | `bin/linear` | Linear GraphQL fallback (`LINEAR_API_KEY`) when this harness has no Linear MCP tools: `issues`, `comment`, `state`, `project-update`, `project-milestones`. |
 | `bin/docker-up` | Makes sure the Docker daemon answers: starts a stopped runtime (OrbStack, colima, Docker Desktop, systemd), `--restart` also restarts a hung one, `--check` only probes. Coordinator only. |
 | `bin/codex-reset` | Redeems a Codex usage reset through the TUI; refuses unless the weekly window is exhausted in a fresh reading. `run-model` runs it by itself, once per account per weekly window (standing authorization, `models.json` `codex_auto_reset`, default true): never wait for permission. |
+| `bin/claude-reset` | Same contract for Claude Code (`/rate-limit-options`, `claude_auto_reset`): takes only a free reset option, never funds, credits or an upgrade; "no reset offered" is final for the window. |
 | `bin/alert` | `list` / `ack <ID\|all>`: CRITICAL alerts raised by `run-model` and `bin/review` (a vendor out of quota on every account with no reset left, a role with no eligible model of its tier, no reviewer for a ticket beyond `review_wait_minutes`, the coordinator account at its quota reserve). Also printed at the top of `bin/eta` and on stderr as `CRITICAL:` lines. |
 
 Helper scripts find the project through the nearest `.autopilot/state.json` (or `$AUTOPILOT_REPO`).

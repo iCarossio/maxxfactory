@@ -866,13 +866,20 @@ def credit_left(r, acct):
     return max(0.0, min(1.0, (100 - float(u['used'])) / 100))
 
 
-def weight(r, m, acct, capacity=None):
+def usage_applies(m, a):
+    """Whether the account's usage reading covers this model: an adapter with `usage.window_groups` tracks only the
+    models those patterns match (opencode: the OpenCode Go allowance, not a Z.ai plan or free models in the same home)."""
+    groups = ((a or {}).get('usage') or {}).get('window_groups')
+    return not groups or any(re.search(mr, str(m.get('model', '')), re.I) for mr in groups.values())
+
+
+def weight(r, m, acct, capacity=None, a=None):
     """Draw weight of a candidate: its subscription (paid > paid? > free) times the remaining total usage of its
     subscription: the fraction of credit left on its account (unknown = neutral 0.5, near exhaustion = almost never)
     times the plan's relative size (models.json `capacity`, default 1; e.g. 12 for a plan with 12x the usage of the
     smallest one; a project's state.json `capacity` {"<key>": n} overrides it for that project). A big plan at half credit is drawn more often than a small plan at half credit, so every paid
     subscription is spent in proportion to what it has left before its reset."""
-    left = credit_left(r, acct)
+    left = credit_left(r, acct) if usage_applies(m, a) else None
     w = 0.5 if left is None else (0.02 if left < 0.1 else left)
     cap = m.get('capacity') if capacity is None else capacity
     return SUB_WEIGHT.get(m.get('subscription'), 0.7) * w * max(0.0, float(cap or 1))
@@ -923,7 +930,7 @@ def pool(r, name, ad=None, rand=None):
         if h and parse_time(h['until']) > t:
             cooling.append((h['until'], k))
         else:
-            live.append((weight(r, m, account_key(m, a), pcap.get(k)), k))
+            live.append((weight(r, m, account_key(m, a), pcap.get(k), a), k))
     order = []
     while live:
         tot = sum(w for w, _ in live)

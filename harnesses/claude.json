@@ -58,5 +58,16 @@
   "coordinator_env": [
     "CLAUDECODE"
   ],
-  "coordinator_env_doc": "variables this CLI sets in the processes it starts: when one is set, the coordinator session runs on this CLI, on the account its account_env names in this process (unset = default home). AUTOPILOT_COORDINATOR=<cli>[/<account>] overrides."
+  "coordinator_env_doc": "variables this CLI sets in the processes it starts: when one is set, the coordinator session runs on this CLI, on the account its account_env names in this process (unset = default home). AUTOPILOT_COORDINATOR=<cli>[/<account>] overrides.",
+  "auto_reset": {
+    "_doc": "Takes a free usage reset Claude Code offers in /rate-limit-options when a fresh reading shows \"Current week (all models)\" at 100% (run-model claim_reset). Never picks a paid option (funds, credits, upgrade). `window` is a regex on the usage window name. {bin} = the runtime bin/, {account} = default or CLAUDE_CONFIG_DIR=<path>.",
+    "window": "Current week \\(all models\\)",
+    "argv": [
+      "{bin}/claude-reset",
+      "--yes",
+      "--account",
+      "{account}"
+    ],
+    "timeout": 240
+  }
 }

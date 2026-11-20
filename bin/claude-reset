@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# claude-reset [--yes] [--account default|CLAUDE_CONFIG_DIR=<path>]  -> take a free usage reset that Claude Code offers
+# on an account whose WEEKLY window is exhausted, through the interactive TUI (/rate-limit-options).
+#
+# Same contract as codex-reset. Standing authorization (models.json `claude_auto_reset`, on by default): `run-model`
+# runs `claude-reset --yes --account <acc>` itself when a fresh reading shows that account's "Current week (all
+# models)" at 100%, at most once per account per weekly window. Refuses unless `run-model usage` shows that window at
+# 100% in a reading newer than the last successful run of the account. Without --yes it only prints the options.
+#
+# It only ever picks an option whose text offers a reset and nothing to pay: an option that mentions funds, credits,
+# an upgrade, a purchase, a price or waiting is never chosen (subscriptions only, no extra usage). When no such option
+# is on the screen it exits 2 with "no reset offered" (run-model records "no reset available" for the window). Any
+# unexpected screen after choosing makes it stop with Esc and exit 2 instead of guessing.
+# Seen on 2.1.327 (Pro, below the limit): "1. Stop and wait for limit to reset / 2. Add funds to continue with usage
+# credits / 3. Upgrade your plan" -> no reset offered. Update the matcher once a real reset option has been seen.
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CHOOSE=0; ACCOUNT=default
+while [ $# -gt 0 ]; do case "$1" in --yes) CHOOSE=1;; --account) ACCOUNT="$2"; shift;; *) echo "unknown flag $1"; exit 1;; esac; shift; done
+weekly=$("$HERE/run-model" usage | python3 -c "
+import json, re, sys
+acc = sys.argv[1]
+u = [e for e in json.load(sys.stdin)['usage'] if e['cli'] == 'claude' and e['account'] == acc]
+w = [x for e in u for x in e['windows'] if re.match(r'current week \(all models\)', x.get('window', ''), re.I) and x.get('used') is not None]
+print(-2 if w and w[0].get('stale') else (w[0]['used'] if w else -1))" "$ACCOUNT")
+echo "claude weekly used ($ACCOUNT): ${weekly}%"
+[ "$weekly" = -1 ] && { echo "REFUSED: no weekly reading for account $ACCOUNT (run-model usage)"; exit 3; }
+[ "$weekly" = -2 ] && { echo "REFUSED: the weekly 100% reading for $ACCOUNT is older than a successful run of that account (stale)"; exit 3; }
+if [ "$CHOOSE" = 1 ] && [ "$weekly" -lt 100 ]; then echo "REFUSED: weekly limit not reached"; exit 3; fi
+case "$ACCOUNT" in CLAUDE_CONFIG_DIR=*) D="${ACCOUNT#CLAUDE_CONFIG_DIR=}"; export CLAUDE_CONFIG_DIR="${D/#\~/$HOME}";; default) unset CLAUDE_CONFIG_DIR;; esac
+unset CLAUDECODE  # a TUI started from inside a Claude Code session must not believe it is nested
+command -v expect >/dev/null || { echo "claude-reset: expect is not installed"; exit 1; }
+TMP=$(mktemp -d)
+# A fixed empty folder, trusted once (the TUI refuses to start in an untrusted folder; a new temp dir each run would
+# pile up trust entries in .claude.json).
+WD="$(python3 -c "import sys; sys.path.insert(0, '$HERE'); import autopilot_lib as l; print(l.CONFIG_DIR)")/tui"; mkdir -p "$WD"
+
+# $1 = keys to send once the options are on screen ("" = only read them), $2 = transcript file
+tui() {
+  cat > "$TMP/r.exp" <<EOX
+set timeout 2
+set stty_init "rows 50 cols 140"
+set env(TERM) xterm-256color
+log_user 0
+log_file -a $2
+cd $WD
+spawn claude
+proc pump {secs} {
+  if {[info exists ::closed]} { return }
+  set end [expr {[clock seconds] + \$secs}]
+  while {[clock seconds] < \$end} {
+    expect {
+      -re "\033\\\\\[6n" { send -- "\033\[20;1R"; exp_continue }
+      -re "\033\\\\\[c" { send -- "\033\[?62;c"; exp_continue }
+      -re "\033\\\\\[\\\\?u" { send -- "\033\[?0u"; exp_continue }
+      timeout {}
+      eof { set ::closed 1; return }
+    }
+  }
+}
+proc screen {} { set f [open "$2"]; set d [read \$f]; close \$f; return \$d }
+pump 10
+if {[regexp -nocase {trust.{0,24}this.{0,24}folder} [screen]]} { send -- "\033\[B"; pump 1; send -- "\r"; pump 8 }
+send -- "/rate-limit-options"; pump 2
+send -- "\r"; pump 10
+if {[string first "What do you want to do" [screen]] < 0} { puts "UNEXPECTED SCREEN: the rate-limit options did not appear"; catch {send -- "\033"}; catch {send -- "\003"}; exit 2 }
+set keys {$1}
+if {\$keys ne ""} {
+  foreach k \$keys { if {\$k eq "down"} { send -- "\033\[B" } elseif {\$k eq "enter"} { send -- "\r" }; pump 1 }
+  pump 15
+}
+catch {send -- "\033"}; pump 1
+catch {send -- "\003"}; pump 1
+catch {send -- "\003"}; pump 2
+exit 0
+EOX
+  expect "$TMP/r.exp"
+}
+
+# The numbered options of the last menu, and the one to choose (0 = none).
+pick() {
+  python3 - "$1" <<'PYEOF'
+import re, sys
+t = open(sys.argv[1], errors='ignore').read()
+t = re.sub(r'\x1b\[[0-9;?<>=]*[ -/]*[@-~]', '', t); t = re.sub(r'\x1b[\]P][^\x07\x1b]*(\x07|\x1b\\)', '', t); t = re.sub(r'\x1b.', '', t)
+i = t.rfind('What do you want to do')
+opts = dict(re.findall(r'(?m)^\W*(\d)\.\s*(.+?)\s*$', t[i:i + 2000])) if i >= 0 else {}
+for n, txt in sorted(opts.items()):
+    print('  %s. %s' % (n, txt))
+paid = re.compile(r'fund|credit|upgrade|buy|purchase|pay|price|\$|€|wait', re.I)
+ok = [int(n) for n, txt in sorted(opts.items()) if re.search(r'reset', txt, re.I) and not paid.search(txt)]
+print('CHOICE %d' % (ok[0] if ok else 0))
+PYEOF
+}
+
+tui "" "$TMP/menu.txt" > "$TMP/out.txt" 2>&1 || { cat "$TMP/out.txt"; echo "full transcript: $TMP/menu.txt"; exit 2; }
+P=$(pick "$TMP/menu.txt"); echo "$P" | grep -v '^CHOICE'
+N=$(echo "$P" | sed -n 's/^CHOICE //p')
+[ "${N:-0}" = 0 ] && { echo "no reset offered (only waiting or paid options): nothing chosen"; echo "full transcript: $TMP/menu.txt"; exit 2; }
+echo "free reset option: $N"
+[ "$CHOOSE" = 1 ] || exit 0
+KEYS=""; for _ in $(seq 2 "$N"); do KEYS="$KEYS down"; done; KEYS="$KEYS enter"
+tui "$KEYS" "$TMP/choose.txt" > "$TMP/out.txt" 2>&1 || { cat "$TMP/out.txt"; echo "full transcript: $TMP/choose.txt"; exit 2; }
+python3 - "$TMP/choose.txt" <<'PYEOF' || { echo "full transcript: $TMP/choose.txt"; exit 2; }
+import re, sys
+t = open(sys.argv[1], errors='ignore').read()
+t = re.sub(r'\x1b\[[0-9;?<>=]*[ -/]*[@-~]', '', t); t = re.sub(r'\x1b.', '', t)
+after = t[t.rfind('What do you want to do'):]
+print(re.sub(r' {3,}', '\n', after[:1200]))
+if re.search(r'fund|payment|checkout|card', after, re.I) or not re.search(r'reset (applied|complete|redeemed|done)|has been reset|limits? (restored|reset)|success', after, re.I):
+    print('UNEXPECTED SCREEN after choosing: reset not confirmed'); sys.exit(2)
+PYEOF
+echo "full transcript: $TMP/choose.txt"
+"$HERE/run-model" usage | python3 -c "
+import json, sys
+acc = sys.argv[1]
+print('claude after:', [(x['window'], x['used']) for e in json.load(sys.stdin)['usage'] if e['cli'] == 'claude' and e['account'] == acc for x in e['windows']])" "$ACCOUNT" || true
