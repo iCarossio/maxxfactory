@@ -97,6 +97,39 @@ def load_state(repo):
     return read_json(p) if os.path.exists(p) else {}
 
 
+def worktrees_dir(repo, st=None):
+    st = load_state(repo) if st is None else st
+    return st.get('worktrees_dir') or os.path.join(os.path.dirname(repo), os.path.basename(repo) + '-wt')
+
+
+# ---------- Spotlight (macOS): agents rewrite thousands of files per hour; an indexed tree keeps mds busy ----------
+
+def spotlight_count(d):
+    """Items Spotlight has indexed under d: None when it cannot tell (not macOS, no mdfind, empty dir, error)."""
+    mdfind = os.environ.get('AUTOPILOT_MDFIND') or shutil.which('mdfind')
+    if not mdfind or not os.path.isdir(d) or not os.listdir(d):
+        return None
+    n = 0
+    for q in (['kMDItemFSName == "*"'], ['-name', '.']):  # neither query alone sees every kind of item
+        try:
+            p = subprocess.run([mdfind, '-onlyin', d, '-count'] + q, capture_output=True, text=True, timeout=20,
+                               stdin=subprocess.DEVNULL)
+            n = max(n, int(p.stdout.strip().splitlines()[-1]))
+        except (subprocess.SubprocessError, ValueError, IndexError, OSError):
+            return None
+    return n
+
+
+def spotlight_dirs(repo):
+    """The trees agents write to: the repo and its worktrees directory (the ones that exist)."""
+    return [d for d in dict.fromkeys([os.path.realpath(repo), os.path.realpath(worktrees_dir(repo))]) if os.path.isdir(d)]
+
+
+def spotlight_indexed(dirs):
+    """[(dir, count)] for every dir Spotlight indexes."""
+    return [(d, n) for d in dirs for n in [spotlight_count(d)] if n]
+
+
 def update_state(repo, fn):
     """Locked read-modify-write of the project state. Coordinators use `bin/state` (same lock) for their own edits."""
     with locked(state_path(repo)):
@@ -668,7 +701,9 @@ def entry_problems(r, key, m, ad=None):
         out.append('model id %s names vendor %s but the entry says %s' % (m.get('model'), hv, v))
     for vv in {v, hv} - {None}:
         clis = VENDOR_CLIS.get(vv, OTHER_VENDOR_CLIS)
-        if m['cli'] not in clis:
+        # Owner exception, per entry: `cross_cli_ok` holds the owner's words allowing this vendor through this CLI
+        # (2026-11-19: Claude and GPT models through agy, whose quota is separate from the vendors' own plans).
+        if m['cli'] not in clis and not m.get('cross_cli_ok'):
             out.append('%s models run only through %s, not %s' % (vv, ' or '.join(clis), m['cli']))
     if is_fast_model(m.get('model', '')) and not m.get('allow_fast'):
         out.append('%s is a %s' % (m.get('model'), FAST_WHY))

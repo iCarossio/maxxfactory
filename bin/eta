@@ -29,7 +29,8 @@ date past the stage schedule, a REPLAN line says `stages` is out of step (run `b
 and `done` count as queued. Ideas (state.json `ideas`, see `bin/idea`) never count: not queued, no bar, no ETA.
 
 Unacknowledged CRITICAL alerts (`bin/alert`, e.g. a vendor out of quota on every account) print first, one
-`CRITICAL:` line each, so no message that starts with the ETA can leave them out.
+`CRITICAL:` line each, so no message that starts with the ETA can leave them out. Then one `SPOTLIGHT:` line per
+project tree Spotlight indexes (`bin/spotlight`).
 
   eta [-v] [--json] [--from-mcp FILE]
                        --json: one JSON object (overall + per milestone + replan + alerts) instead of the text lines
@@ -489,8 +490,10 @@ if milestones:
                      'proposed': mid in proposed_ids})
 pct = progress(list(dict.fromkeys(list(done) + list(inflight) + queue)))[0]
 alerts = [] if os.environ.get('ETA_STATE') else lib.alerts(M)
+spotlight = [] if os.environ.get('ETA_STATE') else ['SPOTLIGHT: %s indexed (%d items): exclude it, see bin/spotlight' % x
+                                                     for x in lib.spotlight_indexed(lib.spotlight_dirs(M))]
 if '--json' in sys.argv:
-    out = {'alerts': [lib.alert_line(a) for a in alerts], 'at': now.astimezone().isoformat(), 'end': end.isoformat(), 'minutes': round(total_end),
+    out = {'alerts': [lib.alert_line(a) for a in alerts] + spotlight, 'at': now.astimezone().isoformat(), 'end': end.isoformat(), 'minutes': round(total_end),
            'spread_min': spread(total_end), 'pct': round(pct, 4), 'done': len(done), 'inflight': len(inflight),
            'todo': len(queue), 'milestones': [dict(r, end=r['end'] and r['end'].isoformat()) for r in rows],
            'replan': replan}
@@ -502,6 +505,8 @@ if MCP_NOTE:
     print('eta: ' + MCP_NOTE, file=sys.stderr)
 for a in alerts:
     print(lib.alert_line(a))
+for x in spotlight:
+    print(x)
 if rows:
     w = max(len(r['name']) for r in rows)
     for r in rows:

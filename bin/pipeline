@@ -149,8 +149,7 @@ def rnd(v):
 
 def wt_of(st, t, v=None):
     v = v or st.get('inflight', {}).get(t) or {}
-    d = st.get('worktrees_dir') or os.path.join(os.path.dirname(M), os.path.basename(M) + '-wt')
-    return v.get('wt') or os.path.join(d, t)
+    return v.get('wt') or os.path.join(lib.worktrees_dir(M, st), t)
 
 
 def ticket_file(t):

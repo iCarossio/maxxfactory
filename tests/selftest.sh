@@ -145,6 +145,9 @@ POOL=plan_review FAKE_BEHAVIOUR=approve $H/bin/review T-1 p1 "$RB" >/dev/null; c
 POOL=plan_review FAKE_BEHAVIOUR=approve $H/bin/review T-1 p2 "$RB" 2 >/dev/null 2>&1; check "plan review k=2 with one other Tier 1 vendor -> 2 (never another tier)" "$?" "2"
 POOL=plan_review ALLOW_MID=1 $H/bin/review T-1 p3 "$RB" >/dev/null 2>&1; check "plan review ALLOW_MID=1 refused" "$?" "1"
 $H/bin/alert ack all >/dev/null 2>&1
+printf '#!/bin/sh\necho "${FAKE_MD_COUNT:-0}"\n' > $SCR/mdfind; chmod +x $SCR/mdfind; mkdir -p $SCR/sp; touch $SCR/sp/f
+check "spotlight: indexed tree -> SPOTLIGHT line, exit 1" "$(AUTOPILOT_MDFIND=$SCR/mdfind FAKE_MD_COUNT=7 $H/bin/spotlight check $SCR/sp | grep -c 'SPOTLIGHT: .*indexed (7 items)') $(AUTOPILOT_MDFIND=$SCR/mdfind FAKE_MD_COUNT=7 $H/bin/spotlight check $SCR/sp >/dev/null; echo $?)" "1 1"
+check "spotlight: excluded tree -> exit 0" "$(AUTOPILOT_MDFIND=$SCR/mdfind FAKE_MD_COUNT=0 $H/bin/spotlight check $SCR/sp >/dev/null; echo $?)" "0"
 
 echo "--- premortem"
 OUT=$(FAKE_BEHAVIOUR=premortem MODEL_TAG=x $H/bin/premortem PLAN.md --planner fk-a); RC=$?; check "premortem default k=1: fk-b alone, both passes -> 0" "$RC" "0"

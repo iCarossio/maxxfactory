@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""spotlight: Spotlight must not index the trees the agents write to (macOS).
+
+Agents create, rewrite and delete thousands of files an hour (worktrees, node_modules, builds, test output). In an
+indexed tree every write wakes `mds`/`mdworker`: the CPU and the disk stay busy all day, and the checks and reviews slow
+down and flake. Every project's repo and its worktrees directory must be excluded from Spotlight.
+
+  spotlight check [DIR...]   # exit 0: none indexed (or not macOS); exit 1: one `SPOTLIGHT: <dir> indexed (<n> items)` line each
+  spotlight fix [DIR...]     # check, then open System Settings > Spotlight > Search Privacy and print what to add
+
+Without DIR: the project's repo (nearest .autopilot/state.json, $AUTOPILOT_REPO, else the git top level of the current
+directory) and its worktrees directory (state.json `worktrees_dir`, default `<repo>-wt`). An empty directory cannot be
+checked: exclude its parent. The simplest fix covers every project at once: add the folder that holds all your code
+(e.g. ~/Work) to Search Privacy. A folder whose name ends in `.noindex` is never indexed either. macOS gives no CLI for
+Search Privacy without root (`mdutil` works per volume, not per folder), so the owner adds it once by hand.
+"""
+import os, subprocess, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+PANE = 'x-apple.systempreferences:com.apple.Spotlight-Settings.extension'
+
+
+def default_dirs():
+    repo = lib.find_repo(required=False)
+    if not repo:
+        p = subprocess.run(['git', 'rev-parse', '--show-toplevel'], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        repo = p.stdout.strip() if p.returncode == 0 else os.getcwd()
+    return lib.spotlight_dirs(repo)
+
+
+def main(a):
+    if not a or a[0] not in ('check', 'fix'):
+        print(__doc__); sys.exit(2)
+    if sys.platform != 'darwin' and not os.environ.get('AUTOPILOT_MDFIND'):
+        print('spotlight: not macOS, nothing to check'); return 0
+    dirs = [os.path.realpath(os.path.expanduser(d)) for d in a[1:]] or default_dirs()
+    bad = lib.spotlight_indexed(dirs)
+    for d in dirs:
+        n = dict(bad).get(d)
+        if n:
+            print('SPOTLIGHT: %s indexed (%d items)' % (d, n))
+        elif lib.spotlight_count(d) is None:
+            print('spotlight: %s cannot be checked (empty or missing): exclude its parent' % d)
+        else:
+            print('spotlight: %s not indexed' % d)
+    if not bad:
+        return 0
+    common = os.path.commonpath([d for d, _ in bad])
+    print('Fix: System Settings > Spotlight > Search Privacy > "+", add %s (or the folder that holds all your code),'
+          ' then run `spotlight check` again.' % common)
+    if a[0] == 'fix' and sys.platform == 'darwin':
+        subprocess.run(['open', PANE], stdin=subprocess.DEVNULL)
+        print('spotlight: opened Search Privacy')
+    return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

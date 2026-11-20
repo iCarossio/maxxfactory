@@ -88,6 +88,7 @@ Add any other CLI with a non-interactive mode with `bin/harness new` (see `/maxx
 - **Decision log.** `bin/decision`: every change of plan, with its source, in `PLAN.md`.
 - **Alerts.** `bin/alert`: CRITICAL alerts (a vendor out of quota everywhere, a role with no model), also posted on the Linear project.
 - **Quota recovery.** `run-model usage --apply` cools down exhausted models until their exact reset; free Codex weekly resets are claimed automatically (`codex_auto_reset`).
+- **Spotlight off.** `bin/spotlight check` (macOS): agents rewrite thousands of files an hour, and an indexed repo or worktrees directory keeps Spotlight busy all day. Init, run and resume check it; `bin/eta` warns while a tree is indexed.
 - **Housekeeping.** `bin/docker-up` / `bin/docker-reap` keep the Docker daemon up and remove dead containers; `bin/bgrun` runs long commands under a stall watchdog.
 - **Nothing personal in the repo.** Roster, accounts and cooldowns live in `~/.config/maxxfactory/`; project state in `<repo>/.autopilot/`.
 
@@ -98,7 +99,7 @@ git clone https://github.com/iCarossio/maxxfactory
 cd maxxfactory && ./install.sh
 ```
 
-Then run `/maxxfactory-init`. Requires Python 3.9+, git, a Linear workspace, and the model CLIs you want to use, logged in.
+Then run `/maxxfactory-init`. Requires Python 3.9+, git, a Linear workspace, and the model CLIs you want to use, logged in. On macOS, exclude the folder that holds your code from Spotlight (System Settings > Spotlight > Search Privacy); `bin/spotlight check` verifies it.
 
 Upgrading from `linear-autopilot`: an existing `~/.config/linear-autopilot/` keeps working until you rename it to `~/.config/maxxfactory/`.
 
