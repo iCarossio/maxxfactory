@@ -906,8 +906,9 @@ def pool(r, name, ad=None, rand=None):
     """Candidates of a role in draw order: no hand-made preference. Healthy candidates off the coordinator's account
     are drawn at random weighted by `weight` (sampling without replacement: the order is the fallback chain), then the
     cooling ones (earliest reset first), then the coordinator's own account last: only for cheap roles (implement,
-    fix, trivial), and for Tier 1/2 roles only when the role has no other candidate at all. run-model also checks the
-    coordinator's remaining quota before using it."""
+    fix, trivial), and for Tier 1/2 roles only when the role has no other candidate at all. With models.json
+    `coordinator_as_peer: true` (owner's choice) the coordinator's account is drawn like any other account in every
+    role. run-model still checks the coordinator's remaining quota (`coordinator_reserve`) before using it."""
     ad = ad if ad is not None else adapters()
     role = role_of(name)
     rand = rand or rng(r)
@@ -916,7 +917,7 @@ def pool(r, name, ad=None, rand=None):
     pcap = project_capacities()
     for k in candidates(r, name, ad):
         m = r['models'][k]; a = ad[m['cli']]
-        if on_coordinator_account(r, m, a):
+        if on_coordinator_account(r, m, a) and not r.get('coordinator_as_peer'):
             coord.append(k); continue
         h = r.get('health', {}).get(k)
         if h and parse_time(h['until']) > t:
@@ -971,7 +972,7 @@ def vendor_ready_at(reg, pool_names, k, excluded, ad=None):
         if x in excluded:
             continue
         m = reg['models'][x]
-        if role_of(pool_names[0]) not in CHEAP_ROLES and on_coordinator_account(reg, m, ad.get(m['cli'])):
+        if role_of(pool_names[0]) not in CHEAP_ROLES and not reg.get('coordinator_as_peer') and on_coordinator_account(reg, m, ad.get(m['cli'])):
             continue
         h = reg.get('health', {}).get(x)
         until = parse_time(h['until']) if h and parse_time(h['until']) > t else t
