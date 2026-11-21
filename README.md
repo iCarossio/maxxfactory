@@ -24,6 +24,7 @@ Skills for Claude Code (or any harness that reads `~/.claude/skills`):
 | `/maxxfactory-idea` | any time | parks your quick ideas, verbatim, in an "Ideas (unscheduled)" milestone, out of every ETA, until you promote them |
 | `/maxxfactory-status` | any time | every configured model, its subscription, the share of its 5-hour, weekly and monthly quota used, and when each resets |
 | `/maxxfactory-usage` | any time | tokens consumed, in total and per harness, today, over the last 7 days and the last 30 days |
+| `/maxxfactory-clean` | any time | commits what is worth keeping, deletes junk, removes orphan and finished worktrees and merged branches, reports the work in progress to resume with `/maxxfactory-continue` |
 
 ## Methodology
 
