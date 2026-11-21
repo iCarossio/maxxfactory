@@ -5,7 +5,7 @@ Config: $AUTOPILOT_CONFIG_DIR (default ~/.config/maxxfactory): models.json (rost
 harnesses/ (adapter overrides), prompts/ (template overrides). Per project: <repo>/.autopilot/state.json.
 Python 3.9+ (no match statements, no nested same-quote f-strings).
 """
-import contextlib, datetime as dt, fcntl, fnmatch, glob, hashlib, json, os, re, shutil, signal, subprocess, sys, tarfile, tempfile
+import contextlib, datetime as dt, fcntl, fnmatch, glob, hashlib, json, os, re, shutil, signal, subprocess, sys, tarfile, tempfile, time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 HOME = os.path.dirname(HERE)
@@ -1203,3 +1203,95 @@ def reap_worktree(path, sig=signal.SIGTERM):
             continue
         done.append(pid)
     return done
+
+
+# ---------- worktree garbage collection ----------
+
+GC_EMPTY_HOURS = 24  # an untouched worktree nobody started (no change, no commit) is kept this long
+
+
+def gc_worktrees(repo, dry=False, now=None):
+    """Removes the worktrees no ticket needs any more, so agents, checks, the indexer and the disk only see the ones
+    in flight. Only worktrees under the project's worktrees directory are looked at; one that is in flight, queued or
+    locked is never touched. Removed: a worktree whose ticket is in `done` (work found in it is saved first as a patch
+    in .autopilot/gc/), and one with no change and no commit of its own for GC_EMPTY_HOURS. A worktree that is not in
+    flight but holds work is never removed: it is reported as an orphan for the coordinator to merge or drop.
+    `autopilot/*` branches left without a worktree go too when their ticket is done or they hold no commit.
+    Returns [(action, path or branch, detail)] with action in removed, branch, orphan, pruned."""
+    st = load_state(repo)
+    now = now or time.time()
+    root = os.path.realpath(worktrees_dir(repo, st)).rstrip('/') + '/'
+    base = st.get('branch') or 'HEAD'
+    inflight = st.get('inflight') or {}
+    done = set(st.get('done') or [])
+    keep_ids = set(inflight) | set(st.get('queue') or [])
+    keep_paths = {os.path.realpath((v or {}).get('wt') or os.path.join(root, t)) for t, v in inflight.items()
+                  if isinstance(v, dict) or v is None}
+    out = []
+    if not dry:
+        p = git(repo, 'worktree', 'prune', '-v')
+        out += [('pruned', l.strip(), '') for l in (p.stdout + p.stderr).splitlines() if l.strip()]
+    entries, cur = [], {}
+    for line in git(repo, 'worktree', 'list', '--porcelain').stdout.splitlines() + ['']:
+        if not line:
+            if cur:
+                entries.append(cur)
+            cur = {}
+        else:
+            k, _, v = line.partition(' ')
+            cur[k] = v
+    used = set()
+    for e in entries[1:]:  # the first entry is the main checkout
+        wt = os.path.realpath(e['worktree'])
+        br = (e.get('branch') or '').replace('refs/heads/', '')
+        used.add(br)
+        t = os.path.basename(wt)
+        if not (wt + '/').startswith(root) or not os.path.isdir(wt):
+            continue
+        if wt in keep_paths or t in keep_ids or 'locked' in e:
+            continue
+        dirty = [l for l in git(wt, 'status', '--porcelain').stdout.splitlines() if l.strip()]
+        ahead = int(git(wt, 'rev-list', '--count', '%s..HEAD' % base).stdout.strip() or 0)
+        try:
+            idle = now - max(os.stat(wt).st_mtime, os.stat(os.path.join(wt, '.git')).st_mtime)
+        except OSError:
+            idle = 0
+        if t in done:
+            why = 'ticket done'
+        elif not dirty and not ahead and idle > GC_EMPTY_HOURS * 3600:
+            why = 'no change and no commit for %d h' % (idle // 3600)
+        else:
+            if dirty or ahead:
+                out.append(('orphan', wt, 'not in flight, %d commit(s) and %d changed file(s) of its own, idle %d h: '
+                                          'merge it, put it back in flight, or remove it' % (ahead, len(dirty), idle // 3600)))
+            continue
+        if dry:
+            out.append(('removed', wt, why + ' (dry run)')); continue
+        if dirty or ahead:  # never lose work silently: the whole difference with the project branch, as one patch
+            git(wt, 'add', '-A')
+            mb = git(wt, 'merge-base', base, 'HEAD').stdout.strip() or 'HEAD'
+            patch = subprocess.run(['git', '-C', wt, 'diff', '--cached', '--binary', mb], capture_output=True).stdout
+            if patch:
+                d = os.path.join(repo, '.autopilot', 'gc'); os.makedirs(d, exist_ok=True)
+                f = os.path.join(d, '%s-%s.patch' % (t, time.strftime('%Y%m%d-%H%M%S', time.localtime(now))))
+                with open(f, 'wb') as fh:
+                    fh.write(patch)
+                why += ', work saved in %s' % os.path.relpath(f, repo)
+        reap_worktree(wt)
+        g = git(repo, 'worktree', 'remove', '--force', wt)
+        if g.returncode != 0:
+            out.append(('orphan', wt, 'could not be removed: %s' % (g.stderr or g.stdout).strip()[-200:])); continue
+        out.append(('removed', wt, why))
+        if br.startswith('autopilot/'):
+            git(repo, 'branch', '-q', '-D', br); used.discard(br)
+            out.append(('branch', br, 'worktree removed'))
+    for br in git(repo, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/autopilot/').stdout.split():
+        t = br.split('/', 1)[1]
+        if br in used or t in keep_ids:
+            continue
+        ahead = int(git(repo, 'rev-list', '--count', '%s..%s' % (base, br)).stdout.strip() or 0)
+        if t in done or not ahead:
+            if not dry:
+                git(repo, 'branch', '-q', '-D', br)
+            out.append(('branch', br, ('ticket done' if t in done else 'no commit of its own') + (' (dry run)' if dry else '')))
+    return out

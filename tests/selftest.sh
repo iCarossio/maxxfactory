@@ -1207,4 +1207,20 @@ RW=$SCR/reap-wt; mkdir -p $RW/web; (cd $RW/web && exec sleep 300) & RSP=$!; slee
 OUT=$(python3 -c "import sys; sys.path.insert(0, '$H/bin'); import autopilot_lib as l; print(len(l.reap_worktree('$RW')))"); sleep 0.5
 check "reap_worktree stops a process left running in a worktree (leaked servers, orphaned checks)" "$OUT $(kill -0 $RSP 2>/dev/null && echo alive || echo gone)" "1 gone"
 wait $RSP 2>/dev/null
+
+# ---------- worktree garbage collection ----------
+GR=$SCR/gc-repo; mkdir -p $GR/.autopilot && (cd $GR && git init -q -b main && git commit -q --allow-empty -m init)
+echo '{"branch": "main", "done": ["G-1"], "queue": ["G-5"], "inflight": {"G-2": {"round": 1, "stage": "triage"}}}' > $GR/.autopilot/state.json
+for t in G-1 G-2 G-3 G-4 G-5; do git -C $GR worktree add -q -b autopilot/$t $SCR/gc-repo-wt/$t main; done
+echo left > $SCR/gc-repo-wt/G-1/left.txt; echo work > $SCR/gc-repo-wt/G-3/work.txt
+git -C $GR branch -q autopilot/G-9 main
+touch -t 202601010000 $SCR/gc-repo-wt/G-4 $SCR/gc-repo-wt/G-4/.git $SCR/gc-repo-wt/G-5 $SCR/gc-repo-wt/G-5/.git
+GD=$(cd $GR && $H/bin/gc --dry-run; echo rc=$?)
+check "gc --dry-run removes nothing" "$(ls $SCR/gc-repo-wt | tr '\n' ' ')" "G-1 G-2 G-3 G-4 G-5 "
+GO=$(cd $GR && $H/bin/gc; echo rc=$?)
+check "gc keeps the in-flight, the queued and the orphan worktrees; removes the done and the empty old ones" "$(ls $SCR/gc-repo-wt | tr '\n' ' ')" "G-2 G-3 G-5 "
+check "gc saves the work left in a done ticket's worktree as a patch" "$(grep -c '^+left$' $GR/.autopilot/gc/G-1-*.patch)" "1"
+check "gc reports a worktree with work that is not in flight, exit 1" "$(echo "$GO" | grep -c '^GC orphan .*G-3: not in flight, 0 commit(s) and 1 changed file(s)') $(echo "$GO" | tail -1)" "1 rc=1"
+check "gc deletes the branches of removed worktrees and stray branches without commits" "$(git -C $GR branch --format='%(refname:short)' | tr '\n' ' ')" "autopilot/G-2 autopilot/G-3 autopilot/G-5 main "
+check "gc dry run listed the same removals" "$(echo "$GD" | grep -c '^GC removed .*(dry run)')" "2"
 echo "=== $PASS passed, $FAIL failed"

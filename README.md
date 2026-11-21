@@ -89,6 +89,7 @@ Add any other CLI with a non-interactive mode with `bin/harness new` (see `/maxx
 - **Decision log.** `bin/decision`: every change of plan, with its source, in `PLAN.md`.
 - **Alerts.** `bin/alert`: CRITICAL alerts (a vendor out of quota everywhere, a role with no model), also posted on the Linear project.
 - **Quota recovery.** `run-model usage --apply` cools down exhausted models until their exact reset; free Codex and Claude weekly resets are claimed automatically (`codex_auto_reset`, `claude_auto_reset`; never a paid option).
+- **Only live worktrees.** The pipeline removes finished and never-started worktrees and their branches every hour (`bin/gc`), stops what still runs in them, and reports the ones that hold unmerged work instead of deleting them.
 - **Spotlight off.** `bin/spotlight check` (macOS): agents rewrite thousands of files an hour, and an indexed repo or worktrees directory keeps Spotlight busy all day. Init, run and resume check it; `bin/eta` warns while a tree is indexed.
 - **Housekeeping.** `bin/docker-up` / `bin/docker-reap` keep the Docker daemon up and remove dead containers; `bin/bgrun` runs long commands under a stall watchdog.
 - **Nothing personal in the repo.** Roster, accounts and cooldowns live in `~/.config/maxxfactory/`; project state in `<repo>/.autopilot/`.

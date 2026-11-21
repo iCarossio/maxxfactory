@@ -174,3 +174,9 @@ What the runtime does now:
 - Past `max_rounds`, a review with fewer findings than the previous one goes on by itself, up to `max_rounds_hard`.
 - The review brief lists what the round was asked to fix: later rounds verify those first and block only on regressions, real defects and unmet acceptance criteria.
 - Opt-in: `auto_start` (queued tickets whose blockers are merged and whose `Touches` do not overlap start alone) and `auto_merge` (approved tickets are merged by the loop).
+
+## Old worktrees pile up (2026-11-20)
+
+Symptom: worktrees of merged tickets, of tickets dropped from the plan and of tickets never started stayed on disk for days, with their branches. Each one costs disk, indexing and dependency installs, keeps servers alive, and a session resumed later can start editing a worktree no ticket owns.
+
+What the runtime does now: `pipeline run` runs the worktree garbage collection every `gc_minutes` (60), and `/maxxfactory-continue` runs `bin/gc` first. Removed: worktrees of done tickets (leftover work saved as a patch in `.autopilot/gc/`), worktrees with no change and no commit for 24 h, and `autopilot/*` branches without a worktree. A worktree that holds work but is not in flight is never deleted: it is reported as an orphan and the coordinator decides at the next heartbeat.

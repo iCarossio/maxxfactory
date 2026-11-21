@@ -65,7 +65,8 @@ DEFAULTS = {'interval': 60, 'max_jobs': 3, 'max_rounds': 5, 'max_merges': 3, 're
             'setup': '',              # command run in a new worktree before round 1 (e.g. `npm ci --prefer-offline`)
             'max_full_jobs': 2,       # full check suites at once (two-level checks), on top of max_jobs
             'max_rounds_hard': 8,     # past max_rounds a review that keeps converging (fewer findings) goes on, up to here
-            'merge_prefix': 'feat'}   # subject of an automatic merge: `<prefix>: <ticket title> [<ISSUE>]`
+            'merge_prefix': 'feat',   # subject of an automatic merge: `<prefix>: <ticket title> [<ISSUE>]`
+            'gc_minutes': 60}         # worktree garbage collection (bin/gc) every N minutes; 0: never
 DRIVEN = ('implement', 'merge', 'rebase', 'review', 'final')
 SHARED = re.compile(r'(^|/)(tests?|__tests__|docs)(/|$)|\.(test|spec)\.|(^|/)test_[^/]*\.py$|_test\.py$')
 GRACE = 90  # seconds before a run or job with no process and no result counts as dead (dispatch races)
@@ -742,7 +743,22 @@ def tick():
     if c['auto_start']:
         auto_start(lib.load_state(M), c)
     sync_attention(lib.load_state(M))
+    collect(c)
     return len(lib.load_state(M).get('inflight', {}))
+
+
+def collect(c):
+    """Worktree garbage collection (lib.gc_worktrees), every `gc_minutes`: only the worktrees in flight stay."""
+    stamp = os.path.join(PD, 'gc.stamp')
+    every = float(c.get('gc_minutes') or 0) * 60
+    if not every or (os.path.exists(stamp) and time.time() - os.path.getmtime(stamp) < every):
+        return
+    open(stamp, 'w').close()
+    try:
+        for act, what, why in lib.gc_worktrees(M):
+            log('gc %s %s%s' % (act, what, (': ' + why) if why else ''))
+    except Exception as e:
+        log('gc error %r' % (e,))
 
 
 def ticket_title(t):

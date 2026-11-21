@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+"""gc: remove the worktrees and branches no ticket needs any more.
+
+  gc [--dry-run]
+
+Looks only at the project's worktrees directory (state.json `worktrees_dir`, default `<repo>-wt`) and at `autopilot/*`
+branches. Never touches a worktree that is in flight, queued or locked.
+  removed  the ticket is in `done` (work still in it is saved first as .autopilot/gc/<ISSUE>-<time>.patch), or the
+           worktree has no change and no commit of its own for 24 h; processes running in it are stopped first
+  branch   an `autopilot/*` branch without a worktree whose ticket is done, or that holds no commit of its own
+  orphan   not in flight but holds work: never removed, reported so the coordinator merges it, puts it back in flight
+           or removes it by hand
+`pipeline run` does this by itself every `pipeline.gc_minutes` (60; 0 turns it off). Exit 0; exit 1 when an orphan is left.
+"""
+import os, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+
+def main(a):
+    if any(x not in ('--dry-run',) for x in a):
+        print(__doc__); return 2
+    res = lib.gc_worktrees(lib.find_repo(), dry='--dry-run' in a)
+    for act, what, why in res:
+        print('GC %s %s%s' % (act, what, (': ' + why) if why else ''))
+    if not res:
+        print('gc: nothing to collect')
+    return 1 if any(r[0] == 'orphan' for r in res) else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
