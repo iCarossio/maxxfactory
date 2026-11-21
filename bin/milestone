@@ -43,6 +43,13 @@ add: extends a running project with a milestone, in this order, never skipping a
   Each step is recorded in .../status.json: rerunning the same command resumes after the last completed step.
   --dry-run validates and prints the stages and per-milestone ETAs the project would have, with no external call.
   --skip-premortem / --skip-review take the reason, which is written into status.json and the decision.
+
+add with "into": tickets added to a milestone that already exists (one ticket, a few, a QA pass). The spec names
+  the milestone in "into" and the batch in "id" (a new slug: the working directory and the PLAN.md marker); "name" is
+  an optional label of the batch. The tickets inherit the milestone's KPIs ("kpis" is optional: only the KPIs this
+  batch adds) and its pre-mortem (step b is skipped by itself, logged). Everything else is the same: validation, plan
+  review (c), approval stop (d), decision (e), Linear issues in the existing projectMilestone (f), a subsection after
+  the milestone's section in PLAN.md and the issues appended to the milestone in state.json (g), ideas (g2), sync (h).
   A KPI or plan still marked TODO (a promoted idea's skeleton) is only a warning in --dry-run and refused otherwise.
 
 spec.json:
@@ -57,6 +64,8 @@ spec.json:
   file outside a shared test or docs path (a directory named tests, test, __tests__ or docs at any depth, or a
   file named *.test.*, *.spec.*, test_*.py or *_test.py). Order them with blocked_by or split by file.
    "from_ideas": ["ENG-40"]}   (optional: ideas promoted into this milestone, see g2)
+  {"into": "core", "id": "core-qa-2", "name": "QA pass 2", "description": "...", "why": "...", "tickets": [...]}
+                               (tickets added to the existing milestone `core`, see `add with "into"`)
 
 adopt: groups tickets that already exist (a project planned before milestones, or a second plan already imported)
 into a milestone: decision logged, then the Linear milestone linked (--linear-id), or created with the issues moved
@@ -289,9 +298,12 @@ def validate(spec, st, repo, mid):
     if not (spec.get('name') or '').strip(): errs.append('name is required')
     if not SLUG.match(mid): errs.append(f'id {mid!r} must be a lowercase slug')
     if any(m.get('id') == mid for m in st.get('milestones') or []): errs.append(f'milestone id {mid!r} already exists')
-    if any(m.get('name') == spec.get('name') for m in st.get('milestones') or []): errs.append(f'milestone name {spec.get("name")!r} already exists')
+    into = spec.get('into')
+    if into and not any(m.get('id') == into for m in st.get('milestones') or []):
+        errs.append(f'into {into!r} is not a milestone of this project (bin/milestone list)')
+    if not into and any(m.get('name') == spec.get('name') for m in st.get('milestones') or []): errs.append(f'milestone name {spec.get("name")!r} already exists')
     kpis = spec.get('kpis') or []
-    if not kpis: errs.append('at least one KPI (kpi, target, measure) is required: no milestone without a measurable outcome')
+    if not kpis and not into: errs.append('at least one KPI (kpi, target, measure) is required: no milestone without a measurable outcome')
     for k in kpis:
         miss = [f for f in ('kpi', 'target', 'measure') if not str(k.get(f) or '').strip()]
         if miss: errs.append(f'KPI {k.get("id") or k.get("kpi") or "?"} lacks {", ".join(miss)}')
@@ -333,9 +345,11 @@ def cell(s):
 
 def render_section(spec, mid, ids=None, meta=None):
     ids = ids or {}
-    lines = [f'### {spec["name"]} <!-- milestone:{mid} -->', '', spec.get('description', '').strip(), '']
+    head = f'#### {spec["name"]}: {spec.get("batch") or mid}' if spec.get('into') else f'### {spec["name"]}'
+    lines = [f'{head} <!-- milestone:{mid} -->', '', spec.get('description', '').strip(), '']
     if meta: lines += [meta, '']
-    lines += ['| # | KPI / acceptance | Target | How measured |', '|---|---|---|---|']
+    if spec.get('kpis') or not spec.get('into'):
+        lines += ['| # | KPI / acceptance | Target | How measured |', '|---|---|---|---|']
     lines += [f'| {cell(k.get("id") or f"K{i}")} | {cell(k["kpi"])} | {cell(k["target"])} | {cell(k["measure"])} |'
               for i, k in enumerate(spec.get('kpis') or [], 1)]
     if spec.get('plan'): lines += ['', spec['plan'].strip()]
@@ -346,11 +360,16 @@ def render_section(spec, mid, ids=None, meta=None):
     return '\n'.join(lines).replace('\n\n\n', '\n\n') + '\n'
 
 
-def insert_section(plan_text, mid, section):
+def insert_section(plan_text, mid, section, after=None):
+    """The section goes at the end of `## Milestones`; with `after` (a milestone id), at the end of that milestone's
+    own section when PLAN.md has one."""
     if f'<!-- milestone:{mid} -->' in plan_text: return plan_text
     lines = plan_text.splitlines()
     start = next((i for i, l in enumerate(lines) if l.startswith('## Milestones')), None)
-    if start is not None:
+    home = next((i for i, l in enumerate(lines) if after and f'<!-- milestone:{after} -->' in l), None)
+    if home is not None:
+        end = next((i for i in range(home + 1, len(lines)) if re.match(r'#{2,3} ', lines[i])), len(lines))
+    elif start is not None:
         end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith('## ')), len(lines))
     else:
         end = next((i for i, l in enumerate(lines) if re.match(r'## (Pre-mortem|Decision log|Approval)', l)), len(lines))
@@ -370,7 +389,11 @@ def what_if(st, mid, spec, resolved, ids):
     issues = [ids[t['slug']] for t in spec['tickets']]
     if not w.get('milestones'):
         w['milestones'] = [{'id': 'current', 'name': w.get('project') or 'Current scope', 'issues': scope_of(w)}]
-    w['milestones'].append({'id': mid, 'name': spec['name'], 'issues': issues})
+    target = next((m for m in w['milestones'] if spec.get('into') and m.get('id') == spec['into']), None)
+    if target is not None:
+        target['issues'] = list(target.get('issues', [])) + issues
+    else:
+        w['milestones'].append({'id': mid, 'name': spec['name'], 'issues': issues})
     w.setdefault('blockers', {}); w.setdefault('sizes', {})
     for t in spec['tickets']:
         w['blockers'][ids[t['slug']]] = [ids.get(b, b) for b in resolved[t['slug']]]
@@ -384,6 +407,7 @@ def propose(repo, mid, spec_path, name):
     """Mark a drafted milestone as proposed: bin/eta shows it (awaiting approval) until it is approved or dropped."""
     def fn(s):
         if any(m.get('id') == mid for m in s.get('milestones') or []): return
+        if any(x.get('id') == mid for m in s.get('milestones') or [] for x in m.get('additions') or []): return
         s.setdefault('proposed_milestones', {})[mid] = {'name': name, 'spec': os.path.abspath(spec_path),
                                                         'at': lib.now().isoformat()}
     lib.update_state(repo, fn)
@@ -406,7 +430,9 @@ def whatif_proposed(repo, st):
             if errs: continue
         ids = {t['slug']: '+' + t['slug'] for t in spec['tickets']}
         w = what_if(w, mid, spec, resolved, ids)
-        w['milestones'][-1]['proposed'] = True
+        target = next((m for m in w['milestones'] if spec.get('into') and m.get('id') == spec['into']), None)
+        if target is not None: target['proposed_issues'] = target.get('proposed_issues', 0) + len(spec['tickets'])
+        else: w['milestones'][-1]['proposed'] = True
     apply_schedule(w)
     return w
 
@@ -498,6 +524,15 @@ def cmd_add(a):
     repo = lib.find_repo(); st = lib.load_state(repo)
     try: spec = lib.read_json(a.spec)
     except (OSError, ValueError) as ex: die(f'cannot read {a.spec}: {ex}')
+    into = spec.get('into')
+    target = next((m for m in st.get('milestones') or [] if into and m.get('id') == into), None)
+    if into:
+        if not spec.get('id'): die('a spec with "into" needs its own "id": a new slug for this batch of tickets')
+        # From here on `name` is the milestone the tickets join (Linear, ideas, messages); `batch` labels this addition.
+        spec = dict(spec, batch=spec.get('batch') or spec.get('name') or spec['id'], name=(target or {}).get('name') or into)
+    if into and any(m.get('id') == spec.get('id') for m in st.get('milestones') or []):
+        print(f'INVALID: milestone id {spec["id"]!r} already exists: a batch added with "into" needs a new id'); sys.exit(1)
+    what = f'{len(spec.get("tickets") or [])} tickets into milestone {spec["name"]!r}' if into else None
     mid = spec.get('id') or re.sub(r'[^a-z0-9]+', '-', (spec.get('name') or '').lower()).strip('-')
     d = os.path.join(repo, '.autopilot', 'plan', 'milestones', mid)
     status_path = os.path.join(d, 'status.json')
@@ -523,7 +558,7 @@ def cmd_add(a):
         w = what_if(st, mid, spec, resolved, ids)
         try: warnings = apply_schedule(w)
         except ValueError as ex: die(str(ex))
-        print(f'valid: milestone {spec["name"]!r} ({mid}), {len(spec["tickets"])} tickets, '
+        print((f'valid: {what} ({mid}), ' if into else f'valid: milestone {spec["name"]!r} ({mid}), {len(spec["tickets"])} tickets, ') +
               f'{sum(units(t.get("estimate", 1)) for t in spec["tickets"]):g} size units (new tickets shown as +slug)')
         for x in placeholders(spec): print(f'  warning: {x} is still TODO: fill it before the real add')
         show_schedule(w['stages'], w['critical_path'])
@@ -550,6 +585,8 @@ def cmd_add(a):
     # A spec edited before approval (findings folded in) is the expected flow; a spec edited and run again WITHOUT
     # --approved asks for a new review round of the new delta.
     stale = not a.approved and status.get('reviewed_digest') not in (None, digest)
+    if into and not a.skip_premortem:  # the milestone was pre-mortem'd when it was planned: tickets added to it get the plan review only
+        a.skip_premortem = 'tickets added to an existing milestone: its pre-mortem stands'
     run_pm = not applied and (stale or not status.get('premortem')) and not a.skip_premortem
     run_rv = not applied and (stale or not status.get('review')) and not a.skip_review
     review_wt = None
@@ -584,10 +621,17 @@ def cmd_add(a):
             else:
                 n = status.get('review_round', 0) + 1
                 inp = os.path.join(d, f'review-input-{n}.md')
-                write_text(inp, f'# Milestone {spec["name"]} (extension of a running project)\n\n'
-                                f'Review this milestone plan as an addition to {plan_path} (read it: the existing plan is '
-                                'being executed). Check it fits the existing architecture, tickets and KPIs, that its '
-                                'dependencies on existing tickets are real and complete, and that its KPIs are measurable. '
+                write_text(inp, (f'# Tickets added to milestone {spec["name"]} (a running project)\n\n'
+                                 f'Review these tickets as an addition to milestone "{spec["name"]}" of {plan_path} (read '
+                                 'it: the existing plan is being executed, and the tickets inherit the KPIs, rules and '
+                                 'guardrails of that milestone). Check they fit the existing architecture and tickets, '
+                                 'that they serve the milestone and do not widen it beyond its KPIs (scope that needs its '
+                                 'own KPI belongs in a new milestone: a major finding), and that their dependencies on '
+                                 'existing tickets are real and complete. ' if into else
+                                 f'# Milestone {spec["name"]} (extension of a running project)\n\n'
+                                 f'Review this milestone plan as an addition to {plan_path} (read it: the existing plan is '
+                                 'being executed). Check it fits the existing architecture, tickets and KPIs, that its '
+                                 'dependencies on existing tickets are real and complete, and that its KPIs are measurable. ') +
                                 'Check that every ticket is atomic: one concern, at most about 400 changed lines, a '
                                 '`touches` list that matches what the instructions really change, and no two tickets that '
                                 'can run in parallel changing the same file (including files that tickets already in '
@@ -615,7 +659,7 @@ def cmd_add(a):
     finally:
         drop_review_worktree(repo, review_wt)
     if not applied and (ran_review_now or not a.approved):
-        print(f'NEEDS APPROVAL: milestone {spec["name"]!r} ({mid}), {len(spec["tickets"])} tickets')
+        print(f'NEEDS APPROVAL: {what} ({mid})' if into else f'NEEDS APPROVAL: milestone {spec["name"]!r} ({mid}), {len(spec["tickets"])} tickets')
         for k in ('premortem', 'review'):
             s = status[k]
             print(f'--- {k}: ' + (f'SKIPPED ({s["skipped"]})' if s.get('skipped') else s['path'] + (' DEGRADED' if s.get('degraded') else '')))
@@ -628,7 +672,8 @@ def cmd_add(a):
     if not status.get('decision'):
         skipped = [f'{k} skipped: {status[k]["skipped"]}' for k in ('premortem', 'review') if status[k].get('skipped')]
         why = '; '.join([spec.get('why') or (spec.get('description') or '').split('. ')[0]] + skipped).strip('; ')
-        rc, out, err = run(repo, [os.path.join(BIN, 'decision'), 'add', '--change', f'milestone {spec["name"]} added: {len(spec["tickets"])} tickets',
+        rc, out, err = run(repo, [os.path.join(BIN, 'decision'), 'add', '--change', (f'milestone {spec["name"]}: {len(spec["tickets"])} tickets added ({mid})' if into else
+                                                           f'milestone {spec["name"]} added: {len(spec["tickets"])} tickets'),
                                   '--source', a.source, '--by', a.by, '--why', why,
                                   '--affects', ', '.join([mid] + [t['slug'] for t in spec['tickets']] + list(spec.get('from_ideas') or []))])
         if rc != 0: die(f'decision refused: {err.strip() or out.strip()}')
@@ -638,10 +683,14 @@ def cmd_add(a):
     if not status.get('linear'):
         if not st.get('project_id') or st['project_id'].startswith('<') or not st.get('team'):
             die('state.json has no project_id/team: a milestone extends an existing Linear project')
+        lin_ms = (target or {}).get('linear_id')  # the existing Linear milestone the tickets join (None: the project only)
+        in_ms = not into or bool(lin_ms)
+        if into and lin_ms and not os.path.exists(os.path.join(d, 'tickets.created.json')):
+            lib.write_json_atomic(os.path.join(d, 'tickets.created.json'), {'milestones': {spec['name']: lin_ms}})  # never created again
         lib.write_json_atomic(tickets_path, {
             'project': {'name': st.get('project', '')},
-            'milestones': [{'name': spec['name'], 'description': spec.get('description', '')}],
-            'tickets': [dict({k: v for k, v in t.items() if k != 'blocked_by'}, milestone=spec['name'],
+            'milestones': [{'name': spec['name'], 'description': spec.get('description', '')}] if in_ms else [],
+            'tickets': [dict({k: v for k, v in t.items() if k != 'blocked_by'}, **({'milestone': spec['name']} if in_ms else {}),
                              estimate=estimate(t),
                              blocked_by=resolved[t['slug']]) for t in spec['tickets']]})
         rc, out, err = run(repo, [os.path.join(BIN, 'linear'), 'import', tickets_path, '--team', st['team'], '--project-id', st['project_id']], capture=False)
@@ -651,14 +700,24 @@ def cmd_add(a):
     ids = {s: v['identifier'] for s, v in created['tickets'].items()}
     # g. PLAN.md + state
     if not status.get('state'):
-        meta = (f'Added {dt.date.today().isoformat()} as an extension ({status["decision"]}). '
+        meta = ((f'Added {dt.date.today().isoformat()} to this milestone ({status["decision"]}). ' if into else
+                 f'Added {dt.date.today().isoformat()} as an extension ({status["decision"]}). ')
                 + ' · '.join(f'{label}: ' + (f'skipped ({status[k]["skipped"]})' if status[k].get('skipped') else f'`{os.path.relpath(status[k]["path"], repo)}`')
                              for k, label in (('premortem', 'Pre-mortem'), ('review', 'plan review'))))
-        write_text(plan_path, insert_section(open(plan_path).read(), mid, render_section(spec, mid, ids, meta)))
+        write_text(plan_path, insert_section(open(plan_path).read(), mid, render_section(spec, mid, ids, meta), after=into))
 
         def fn(s):
             s.setdefault('milestones', [])
-            if not any(m['id'] == mid for m in s['milestones']):
+            new = [ids[t['slug']] for t in spec['tickets']]
+            if into:
+                m = next((m for m in s['milestones'] if m.get('id') == into), None)
+                if m is None: die(f'milestone {into!r} is no longer in state.json')
+                m['issues'] = list(dict.fromkeys(list(m.get('issues', [])) + new))
+                if not any(x.get('id') == mid for x in m.get('additions') or []):
+                    m.setdefault('additions', []).append({'id': mid, 'name': spec['batch'], 'issues': new,
+                                                          'added': dt.date.today().isoformat(),
+                                                          'plan_review': status['review'].get('path')})
+            elif not any(m['id'] == mid for m in s['milestones']):
                 if not s['milestones'] and scope_of(s):
                     s['milestones'].append({'id': 'current', 'name': s.get('project') or 'Current scope', 'linear_id': None,
                                             'issues': scope_of(s), 'added': None, 'origin': 'plan',
@@ -686,7 +745,8 @@ def cmd_add(a):
     lin = linear(repo)
     lin.cmd_project_content([st['project_id'], plan_path])
     status['synced'] = do_sync(repo, [status['decision']]); save()
-    print(f'milestone {mid} added: {", ".join(ids[t["slug"]] for t in spec["tickets"])} ({status["decision"]}, {status["synced"]})')
+    print((f'milestone {spec["name"]}: added ' if into else f'milestone {mid} added: ')
+          + f'{", ".join(ids[t["slug"]] for t in spec["tickets"])} ({status["decision"]}, {status["synced"]})')
 
 
 def close_idea(repo, idea, spec, ids, plan_path, decision, rid):

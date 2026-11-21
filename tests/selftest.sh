@@ -807,6 +807,32 @@ check "promote: milestone added with the promoted tickets" "$RC $(J $MR/.autopil
 check "promote hook: ideas closed as duplicates of their tickets, commented, out of the backlog" "$(J $SCR/linear.json "[(i['identifier'], i.get('stateId')) for i in d['issues'] if i['identifier'] in ('ENG-61','ENG-62')], sorted(tuple(next(i['identifier'] for i in d['issues'] if i['id']==x) for x in (r['issueId'], r['relatedIssueId'])) for r in d['relations'] if r['type']=='duplicate'), len(d.get('comments', []))") $(J $MR/.autopilot/state.json "d['ideas']['issues']")" "[('ENG-61', 'st-duplicate'), ('ENG-62', 'st-duplicate')] [('ENG-61', 'ENG-71'), ('ENG-62', 'ENG-72')] 2 ['ENG-70']"
 check "promote hook: backlog rows struck through with the new tickets" "$(grep -c '^| ENG-61 | ~~RBAC like Claude Cowork (roles: global, per project)~~ promoted to RBAC and vault (ENG-71) |$' $MR/PLAN.md)" "1"
 N=$(NCALLS); MS add $SPEC --approved --by owner --source 'user:"go"' >/dev/null 2>&1; check "promote: rerun after completion is a no-op" "$? $(NCALLS)" "0 $N"
+# milestone add with "into": tickets added to an existing milestone (no KPI, no pre-mortem, plan review, approval).
+cat > $SCR/into.json <<'EOF'
+{"into": "ext", "id": "ext-qa", "name": "QA pass", "description": "QA of the UI.", "why": "the owner adds a QA ticket",
+ "tickets": [{"slug": "qa-ui", "title": "QA the UI", "estimate": "S", "touches": ["web/tests/qa/"], "blocked_by": ["ui"]}]}
+EOF
+INTO() { python3 -c "import json;s=json.load(open('$SCR/into.json'));$1;json.dump(s,open('$SCR/into-bad.json','w'))"; MS add $SCR/into-bad.json --dry-run 2>&1 | grep -c "$2"; }
+check "add into: an unknown milestone refused" "$(INTO "s['into']='nope'" "INVALID: into 'nope' is not a milestone")" "1"
+check "add into: the batch needs its own id" "$(INTO "s.pop('id')" 'needs its own "id"')" "1"
+check "add into: the id of a milestone refused" "$(INTO "s['id']='ext'" "INVALID: milestone id 'ext' already exists")" "1"
+NM=$(J $MR/.autopilot/state.json "len(d['milestones'])"); NPM=$(NCALLS projectMilestoneCreate)
+OUT=$(MS add $SCR/into.json --dry-run 2>&1); check "add into --dry-run: valid without a KPI" "$? $(echo "$OUT" | grep -c "^valid: 1 tickets into milestone 'Extension' (ext-qa)")" "0 1"
+check "add into: proposed tickets shown on the milestone's own bar" "$(ETA | grep -c '^Extension (+1 proposed) .* 2/3 done\|^Extension (+1 proposed) .*/3 done')" "1"
+OUT=$(FAKE_BEHAVIOUR=auto MS add $SCR/into.json --review-k 1 2>&1); RC=$?
+check "add into: plan review only, then stops for approval" "$RC $(echo "$OUT" | grep -c 'pre-mortem of milestone') $(echo "$OUT" | grep -c '^--- premortem: SKIPPED (tickets added to an existing milestone') $(echo "$OUT" | grep -c '^--- review: .*ext-qa/plan-review.md') $(grep -c 'inherit the KPIs' $MR/.autopilot/plan/milestones/ext-qa/review-input-1.md)" "3 0 1 1 1"
+OUT=$(MS add $SCR/into.json --approved --by owner --source 'user:"add the QA"' 2>&1); RC=$?
+NEWI=$(J $MR/.autopilot/state.json "[m for m in d['milestones'] if m['id']=='ext'][0]['issues'][-1]")
+check "add into --approved: no milestone created, in state or in Linear" "$RC $(J $MR/.autopilot/state.json "len(d['milestones'])") $(NCALLS projectMilestoneCreate)" "0 $NM $NPM"
+check "add into: the issue joins the Linear milestone and the state milestone, blocked by the existing ticket" "$(J $SCR/linear.json "[i.get('projectMilestoneId') == [m for m in d['milestones'] if m['name'] == 'Extension'][0]['id'] for i in d['issues'] if i['identifier'] == '$NEWI']") $(J $MR/.autopilot/state.json "[m for m in d['milestones'] if m['id']=='ext'][0]['issues'][:2], d['blockers']['$NEWI'], [(x['id'], x['name'], x['issues'] == ['$NEWI']) for x in [m for m in d['milestones'] if m['id']=='ext'][0]['additions']], '$NEWI' in d['queue'], 'ext-qa' in (d.get('proposed_milestones') or {})")" "[True] ['ENG-6', 'ENG-7'] ['ENG-7'] [('ext-qa', 'QA pass', True)] True False"
+check "add into: subsection inside the milestone's section of PLAN.md, decision logged" "$(awk '/<!-- milestone:ext -->/{a=NR} /<!-- milestone:ext-qa -->/{b=NR} /<!-- milestone:docs -->/{c=NR} END{print (a<b && b<c)}' $MR/PLAN.md) $(grep -c '^#### Extension: QA pass <!-- milestone:ext-qa -->$' $MR/PLAN.md) $(AUTOPILOT_REPO=$MR $H/bin/decision list | grep 'milestone Extension: 1 tickets added (ext-qa)  <- user:"add the QA"' | grep -vc '\[pending\]')" "1 1 1"
+N=$(NCALLS); OUT=$(MS add $SCR/into.json --approved --by owner --source 'user:"add the QA"' 2>&1); check "add into: rerun after completion is a no-op" "$? $(echo "$OUT" | grep -c 'already added') $(NCALLS)" "0 1 $N"
+SPEC2=$(IDEA promote ENG-70 --into ext --id ext-ideas | head -1)
+check "idea promote --into: skeleton joins the milestone, no KPI or plan to fill" "$(J $SPEC2 "d['into'], d['id'], 'kpis' in d, 'plan' in d, 'name' in d, d['from_ideas']")" "ext ext-ideas False False False ['ENG-70']"
+IDEA promote ENG-70 --into nope --id x1 >/dev/null 2>&1; check "idea promote --into: an unknown milestone refused" "$?" "1"
+python3 -c "import json;p='$SPEC2';s=json.load(open(p));[t.update(description='do it') for t in s['tickets']];json.dump(s,open(p,'w'))"
+OUT=$(MS add $SPEC2 --skip-review "test" --approved --by owner --source 'user:"schedule it"' 2>&1); RC=$?
+check "promote --into: idea closed into a ticket of the existing milestone" "$RC $(J $MR/.autopilot/state.json "len([m for m in d['milestones'] if m['id']=='ext'][0]['issues']), [x['id'] for x in [m for m in d['milestones'] if m['id']=='ext'][0]['additions']], d['ideas']['issues']") $(grep -c '~~private locations~~ promoted to Extension' $MR/PLAN.md)" "0 4 ['ext-qa', 'ext-ideas'] [] 1"
 SD=$SCR/seed-repo; mkdir -p $SD/.autopilot/plan && echo '{"branch": "x", "queue": [], "done": []}' > $SD/.autopilot/state.json
 cat > $SD/.autopilot/plan/tickets.json <<'EOF'
 {"project": {"name": "P"}, "milestones": [{"name": "M1 Base"}, {"name": "M2 More"}],

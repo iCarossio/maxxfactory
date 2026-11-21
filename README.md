@@ -18,7 +18,7 @@ Skills for Claude Code (or any harness that reads `~/.claude/skills`):
 |---|---|---|
 | `/maxxfactory-init` | once per machine | finds your CLIs and their accounts, asks which subscriptions you pay for, gives every model its tier, smoke-tests them, prints what each role can use and what is missing |
 | `/maxxfactory-plan` | once per project | your plan and KPIs, a pre-mortem by a flagship of another vendor, guardrails, then the Linear project with milestones, tickets and dependencies |
-| `/maxxfactory-milestone` | when the project grows | the same treatment for a new milestone of an existing project, from new scope or from parked ideas |
+| `/maxxfactory-plan-more` | when the project grows | plans more work for an existing project, from new scope or from parked ideas: tickets or a QA pass added to a current milestone (plan review and your approval), or a new milestone (KPIs, pre-mortem, plan review, approval) |
 | `/maxxfactory-run` | per project, for hours | runs the tickets: plan, review the plan, implement, review the code, repeat until approved, one commit per ticket, Linear kept up to date |
 | `/maxxfactory-continue` | after a session ends | resumes a run where it stopped, without setup questions |
 | `/maxxfactory-idea` | any time | parks your quick ideas, verbatim, in an "Ideas (unscheduled)" milestone, out of every ETA, until you promote them |
@@ -111,7 +111,7 @@ The skills are the interface; they call the runtime in `bin/`, which you can als
 | `bin/mkbrief` | fills the brief of an implementer, reviewer, plan reviewer or diagnosis from `prompts/` |
 | `bin/review` | sends one round to one or several reviewers and prints compact verdicts |
 | `bin/premortem` | pre-mortem of a plan by flagship models of other vendors |
-| `bin/milestone` | milestones in `state.json` and Linear, each with its progress bar and ETA |
+| `bin/milestone` | milestones in `state.json` and Linear, each with its progress bar and ETA: `list`, `seed`, `add` (a new milestone, or tickets into an existing one), `adopt`, `recompute`, `sync`, `tidy`, `proposed` |
 | `bin/idea` | parks, lists and promotes ideas in the "Ideas (unscheduled)" milestone |
 | `bin/eta` | progress bar and ETA of the project (`-v` adds the schedule) |
 | `bin/decision` | the sourced decision log in `PLAN.md` |

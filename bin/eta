@@ -471,7 +471,8 @@ def spread(m):
 
 rows = []
 if milestones:
-    groups = [(m.get('id') or m.get('name'), (m.get('name') or m.get('id')) + (' (proposed)' if m.get('proposed') else ''),
+    groups = [(m.get('id') or m.get('name'), (m.get('name') or m.get('id')) + (' (proposed)' if m.get('proposed') else '')
+               + (' (+%d proposed)' % m['proposed_issues'] if m.get('proposed_issues') else ''),
                m.get('linear_id'), list(dict.fromkeys(m.get('issues', []))))
               for m in milestones]
     proposed_ids = {m.get('id') for m in milestones if m.get('proposed')}

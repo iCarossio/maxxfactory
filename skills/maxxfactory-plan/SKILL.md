@@ -16,9 +16,9 @@ You are the **master planner**. The user is present for this phase: ask what you
 | `bin/premortem` | `premortem <PLAN.md> --planner <key>`: pre-mortem by a Tier 1 model of another vendor, two passes, `.autopilot/plan/premortem.md`. `--out-dir` for a milestone's own. |
 | `bin/decision` | `decision add|list|check|synced`: the sourced Decision log in `PLAN.md`. |
 | `bin/linear` | `linear import <tickets.json> --team KEY`: project, milestones, issues, relations; idempotent checkpoint. |
-| `bin/milestone` | `seed` (state from the imported plan), `add <spec>` (a milestone added later, driven by `/maxxfactory-milestone`), `recompute`, `sync` (milestone target dates + bars in a project update, and tidy), `tidy [--dry-run]`, `list`. |
+| `bin/milestone` | `seed` (state from the imported plan), `add <spec>` (a milestone, or tickets of an existing one, added later, driven by `/maxxfactory-plan-more`), `recompute`, `sync` (milestone target dates + bars in a project update, and tidy), `tidy [--dry-run]`, `list`. |
 | `bin/eta` | One progress bar + ETA per milestone, then overall; `--json`. |
-| `bin/idea` | `/maxxfactory-idea`: owner ideas parked unscheduled in the "Ideas (unscheduled)" milestone; `promote` writes a milestone spec skeleton from ideas for `/maxxfactory-milestone` (see "Extending a project"). |
+| `bin/idea` | `/maxxfactory-idea`: owner ideas parked unscheduled in the "Ideas (unscheduled)" milestone; `promote` writes a milestone spec skeleton from ideas for `/maxxfactory-plan-more` (see "Extending a project"). |
 
 ## Every change of plan is sourced
 
@@ -109,9 +109,9 @@ From now on, a change of plan reaches Linear as well as `PLAN.md`: re-sync the p
 - Seed `<repo>/.autopilot/state.json` from `templates/state.json`: project, project id, team, branch, push, checks, coordinator. Then `bin/milestone seed .autopilot/plan/tickets.json`: `milestones`, `blockers`, `sizes`, `queue`, `stages` and `critical_path` from the plan (with MCP tools, write `tickets.created.json` in the same format first). Then `bin/milestone sync`: target dates and the first milestone bars in Linear.
 - Tell the user, in a few lines: the Linear project link, the number of tickets and milestones, the top three failure reasons and their guardrails, and that `/maxxfactory-run` will execute it.
 
-## Extending a project (a milestone added later)
+## Extending a project (tickets or a milestone added later)
 
-Adding a major milestone to a project that already exists is `/maxxfactory-milestone`: the same intake gate, pre-mortem, plan review and approval, scoped to the new milestone, through `bin/milestone add`. Never hand-edit state, `PLAN.md` or Linear for it. It also takes ideas parked with `/maxxfactory-idea` as input (`/maxxfactory-milestone ENG-40,ENG-41`): it promotes them into the milestone and, on approval, closes them as duplicates of the new tickets.
+Adding scope to a project that already exists is `/maxxfactory-plan-more`, through `bin/milestone add`. A new major milestone gets the same intake gate, pre-mortem, plan review and approval as this plan, scoped to the milestone. Tickets added to a milestone that exists (one ticket, a few, a QA pass) inherit its KPIs and its pre-mortem and get the plan review and the approval only. Never hand-edit state, `PLAN.md` or Linear for either. It also takes ideas parked with `/maxxfactory-idea` as input (`/maxxfactory-plan-more ENG-40,ENG-41`): it promotes them and, on approval, closes them as duplicates of the new tickets.
 
 When a plan is folded into an existing project as a milestone, the Linear project created for that plan is left with no issues. Preserve the creation evidence: keep `project_created: true` and set `created_project_id` to the project this autopilot created. `project_id` may name the destination the tickets moved into; tidy archives `created_project_id`, not that destination. Do not rewrite the checkpoint so the created id disappears, and do not set `project_created` false on it. The destination's own checkpoint, if you write one, has `project_created: false`. The next `bin/milestone sync` archives the empty created project: tidy archives a project only when `project_created: true` (or a legacy reserved project id, or state.json `autopilot_project_ids`) records it, the id is not the current `project_id`, and the project has no issues. An imported destination is never archived.
 

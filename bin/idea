@@ -13,8 +13,10 @@ An idea is not work: no pre-mortem, no review, not in `queue`, `stages` or `mile
                                          existing issues (ideas collected before this command) moved into the Ideas
                                          milestone, label `idea`, state Backlog
   idea promote ENG-1[,ENG-2...] --id <milestone-id> --name "<name>" [--force]
+  idea promote ENG-1[,ENG-2...] --into <existing-milestone-id> --id <batch-id> [--name "<label>"] [--force]
+                                         the ideas become tickets of a milestone that exists: no KPI, no plan to fill
                                          writes the `bin/milestone add` spec skeleton
-                                         .autopilot/plan/milestones/<id>/spec.json (where /maxxfactory-milestone keeps it)
+                                         .autopilot/plan/milestones/<id>/spec.json (where /maxxfactory-plan-more keeps it)
 
 add, in order, each step checkpointed in .autopilot/ideas/created.json (a rerun with the same title resumes and never
 creates a second issue):
@@ -341,18 +343,23 @@ def cmd_promote(a):
                         'touches': ['src/%s/' % s],
                         'description': f'{TODO}: split into tickets a cheap implementer can do in one commit (instructions, '
                                        f'CHECKS:, **Acceptance**, guardrails). Source: idea {t}.'})
+    if not a.into and not a.name: die('--name is required for a new milestone')
+    if a.into and not any(m.get('id') == a.into for m in st.get('milestones') or []): die(f'--into {a.into!r} is not a milestone of this project (bin/milestone list)')
     spec = {'id': a.id, 'name': a.name,
             'description': f'Promoted from the idea backlog: {", ".join(issues)}.\n\n' + '\n\n'.join(quotes),
             'why': f'the owner schedules ideas {", ".join(issues)}',
             'kpis': [{'id': 'K1', 'kpi': f'{TODO}: the measurable outcome of this milestone', 'target': TODO, 'measure': TODO}],
             'plan': f'{TODO}: goal, architecture, rules and guardrails of this milestone.',
             'tickets': tickets, 'from_ideas': issues}
+    if a.into:  # tickets of an existing milestone: they inherit its KPIs and plan
+        spec = {k: v for k, v in spec.items() if k not in ('kpis', 'plan') and (k != 'name' or v)}
+        spec = dict(into=a.into, **spec)
     os.makedirs(os.path.dirname(out), exist_ok=True); lib.write_json_atomic(out, spec)
     print(out)
-    print(f'Next: /maxxfactory-milestone on this spec: fill every {TODO} with the owner (KPIs with target and measurement, '
-          'plan, tickets; keep "from_ideas"), then\n'
+    print(f'Next: /maxxfactory-plan-more on this spec: fill every {TODO} with the owner ('
+          + ('' if a.into else 'KPIs with target and measurement, plan, ') + 'tickets; keep "from_ideas"), then\n'
           f'  bin/milestone add {out} --dry-run\n'
-          f'  bin/milestone add {out}          # pre-mortem + plan review, stops for approval (exit 3)\n'
+          f'  bin/milestone add {out}          # ' + ('' if a.into else 'pre-mortem + ') + 'plan review, stops for approval (exit 3)\n'
           f'  bin/milestone add {out} --approved --by <owner> --source user:"<their approval>"\n'
           'On approval the ideas are closed as duplicates of the new tickets and leave the backlog.')
 
@@ -365,7 +372,7 @@ def main():
     li = sub.add_parser('list'); li.add_argument('--json', action='store_true')
     ao = sub.add_parser('adopt'); ao.add_argument('issues'); ao.add_argument('--source', required=True); ao.add_argument('--by')
     ao.add_argument('--dry-run', action='store_true')
-    pr = sub.add_parser('promote'); pr.add_argument('issues'); pr.add_argument('--id', required=True); pr.add_argument('--name', required=True)
+    pr = sub.add_parser('promote'); pr.add_argument('issues'); pr.add_argument('--id', required=True); pr.add_argument('--name'); pr.add_argument('--into')
     pr.add_argument('--force', action='store_true')
     a = p.parse_args()
     {'add': cmd_add, 'list': cmd_list, 'adopt': cmd_adopt, 'promote': cmd_promote}[a.cmd](a)
