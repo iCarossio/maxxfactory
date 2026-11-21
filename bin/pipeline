@@ -982,6 +982,18 @@ def cmd_retry(t):
     print('%s r%s: %s again' % (t, r, frm))
 
 
+def restore_foreign_notes(t, wt):
+    """Put back tracked files under docs/notes that belong to other tickets. Browser and screenshot tests rewrite the
+    committed evidence of earlier tickets (docs/notes/<OTHER>/*.png) in every tree they run in; on 2026-11-21 one
+    ticket's tree held 166 such files, and the squash would have committed them as this ticket's change."""
+    out = lib.git(wt, 'diff', '--name-only', 'HEAD', '--', 'docs/notes').stdout.split()
+    own = ('docs/notes/%s/' % t, 'docs/notes/%s.' % t, 'docs/notes/%s-' % t)
+    foreign = [f for f in out if not f.startswith(own)]
+    if foreign:
+        lib.git(wt, 'checkout', 'HEAD', '--', *foreign)
+        log('%s: restored %d tracked notes of other tickets before the merge' % (t, len(foreign)))
+
+
 def cmd_merge(t, subj, body):
     """Rebase, squash, finish. A conflict sends the ticket back to a merge round and exits 3."""
     st = lib.load_state(M)
@@ -1001,6 +1013,7 @@ def cmd_merge(t, subj, body):
         s2 = lib.load_state(M)
         merge_round(t, s2['inflight'][t], s2, cfg(s2), why)
 
+    restore_foreign_notes(t, wt)
     p = subprocess.run([tool('rebase-wt'), wt, br], capture_output=True, text=True, env=env(), stdin=subprocess.DEVNULL)
     out = (p.stdout + p.stderr).strip()
     if p.returncode:
