@@ -180,3 +180,12 @@ What the runtime does now:
 Symptom: worktrees of merged tickets, of tickets dropped from the plan and of tickets never started stayed on disk for days, with their branches. Each one costs disk, indexing and dependency installs, keeps servers alive, and a session resumed later can start editing a worktree no ticket owns.
 
 What the runtime does now: `pipeline run` runs the worktree garbage collection every `gc_minutes` (60), and `/maxxfactory-continue` runs `bin/gc` first. Removed: worktrees of done tickets (leftover work saved as a patch in `.autopilot/gc/`), worktrees with no change and no commit for 24 h, and `autopilot/*` branches without a worktree. A worktree that holds work but is not in flight is never deleted: it is reported as an orphan and the coordinator decides at the next heartbeat.
+
+## 2026-11-21: environment gaps sent good rounds to triage
+
+- A fast check that runs `npm` directly does not load the project `.env`; a `just` recipe does. Write fast checks that need the environment as `set -a && . ./.env && set +a && ...`.
+- A worktree created by `auto_start` has no `.env` (it is gitignored). Until the pipeline copies it by itself, the project `setup` step must copy it (`cp -n <repo>/.env .env`). An implementer without it writes its own from `.env.example`.
+- `pipeline fix` on a ticket that was on hold does not rebase first: the implementer then works on a stale tree and reports itself blocked on files another ticket already changed. Run `rebase-wt` before dispatching such a round.
+- An empty round after an environment failure is correct, not a stall: reset `round`, clear `tree`/`empty_retry`, and send the ticket back to checks.
+- Two full suites at once on 16 cores (load 37-41) fail browser and container tests that pass alone. Keep `max_full_jobs` at 1 on one machine, and rerun the failing tests alone before sending an approved ticket back.
+- Test runs rewrite tracked screenshots of other tickets and add `.next-dev-smoke` entries to `web/tsconfig.json`: restore them before a merge.
