@@ -1240,7 +1240,8 @@ def gc_worktrees(repo, dry=False, now=None):
         else:
             k, _, v = line.partition(' ')
             cur[k] = v
-    used = set()
+    # the project branch and the branch of the main checkout are never collected
+    used = {base} | {(e.get('branch') or '').replace('refs/heads/', '') for e in entries[:1]}
     for e in entries[1:]:  # the first entry is the main checkout
         wt = os.path.realpath(e['worktree'])
         br = (e.get('branch') or '').replace('refs/heads/', '')
