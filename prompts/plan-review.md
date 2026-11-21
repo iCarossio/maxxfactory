@@ -15,6 +15,7 @@ You review the implementation plan (the ticket file) BEFORE any code is written.
 2. Architecture: is the decision right for this repo, consistent with earlier decisions in the notes, and the simplest one that meets the goal? Name a concrete better alternative if there is one.
 3. Acceptance: is every criterion verifiable by the `CHECKS:` line or a named test? Name criteria nobody can check, and checks that can pass by construction.
 4. Gaps for a cheap implementer: missing inputs, unstated edge cases from the real data, files it must not touch, ports/containers for parallel runs, ordering between sub-steps.
+4b. Human prerequisites: anything this ticket needs that only a human can provide (an account, an API key, a paid plan, DNS, an access grant, real data, a sign-off) must be a row of the `Human prerequisites` table of `PLAN.md`, `provided` or `deferred` with a fallback this ticket can use. A need that is not there is a `major` finding: an unattended run stops on it.
 5. Shortcut traps: places where the obvious cheap route is a shortcut (copying expected outputs, per-case lists, test-only code); the plan should forbid them explicitly.
 5b. Design bar: a ticket that changes something a user sees must name its references, look criteria on realistic data and screenshot acceptance; functional criteria alone are an unmet planning criterion.
 6. Scope and size: work outside the Linear ticket, or a plan too big for one round (> ~400 changed lines) that should be split.

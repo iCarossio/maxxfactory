@@ -114,6 +114,10 @@ Show the updated spec (KPIs, ticket table, pre-mortem table, ETAs from a new `--
 
 **Re-review after a material fold.** A rerun of `bin/milestone add <spec>` without `--approved` detects the changed spec and runs the pre-mortem and the plan review again. Do it when the fold added scope, tickets or architecture. When it only added the guardrails the reviewers asked for, the user may approve directly.
 
+## 4b. Human prerequisites gate (both shapes)
+
+Same rule as `/maxxfactory-plan` (step 1 and step 5b): walk every ticket of the spec and list what only a human can provide (an account, an API key or token, an OAuth app, a paid plan, DNS, an access grant, real data, a test user, a sign-off) that the project's `Human prerequisites` table of `PLAN.md` does not already hold as `provided`. Ask for all of it in one message, with `! pbcopyenv <NAME>` for every secret (never pasted in the chat), run each row's verify command yourself, and add the rows to the table. A row the owner cannot provide today is `deferred`: fallback, tickets held back (`blocked_by`, scheduled last), logged with `bin/decision add --source user:"<their words>"`. Do not run step 5 while a row is `missing`. Nothing needed: say so in one line and go on. A project with no table yet (planned before this rule): create it now for the whole remaining queue, not only for the added tickets.
+
 ## 5. Apply (only after approval)
 
 ```
@@ -134,6 +138,8 @@ Then: apply the outside-the-milestone decisions from step 4, run `bin/decision c
 Tell the user in a few lines: the shape you took, the Linear milestone link, the ideas closed into it (with their new tickets), the number of tickets, the top three failure reasons and their guardrails (a new milestone) or the findings folded in (added tickets), the `bin/eta` lines (one bar per milestone), and what happens next: the running `/maxxfactory-run` picks the tickets up at its next re-plan; if none is running, `/maxxfactory-run` starts them.
 
 ## Rules
+
+- No human prerequisite left open at apply time (step 4b): `provided` and verified, or `deferred` with a fallback and a decision.
 
 - You plan; you never implement. Reading the repo is allowed, editing code is not.
 - Reviewers are read-only and never of your own vendor or model (`--planner` excludes them).

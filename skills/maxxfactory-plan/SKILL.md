@@ -61,6 +61,9 @@ Then write `PLAN.md` with:
 - Rules for implementers and reviewers (forbidden shortcuts, required tests).
 - For every ticket that changes something a user sees: the references it must match, its look criteria and its screenshot acceptance (see the design bar in step 0). A UI ticket whose acceptance is only functional is a planning defect.
 - Open human decisions with a safe default each.
+- **Human prerequisites** (the `Human prerequisites` table, rows `H1`, `H2`, ...): everything only a human can do, found by walking every ticket and asking "what does this need that no agent can get with the access it has today?". Look for: accounts to create (a SaaS, a cloud project, an app store, a sandbox tenant), API keys, tokens and webhook secrets, OAuth apps and their redirect URLs, paid plans or quota raises, DNS and domains, access grants (a repo, an org, a database, a VPN), real data, exports or fixtures only the owner has, test users and devices, 2FA or captcha steps, legal or design sign-offs. Each row names the tickets that need it, how the owner hands it over, and a verify command that proves it works without printing a secret. What an agent can do with existing access is not a prerequisite: do not ask for it.
+
+**Ask for them now, in one message**, as soon as the draft exists: the numbered list, what to do for each (the exact page or command), and for every secret the line to type, `! pbcopyenv <NAME>` (it appends `NAME=<clipboard>` to `.env` without printing it; `/maxxfactory-init` installs it; when it is not installed, the owner edits `.env` themselves). Never ask the owner to paste a secret in the chat, never print a `.env` value, and check that `.env` is ignored by git. The owner works on the list while the pre-mortem runs; the gate is step 5b.
 
 ## 2. Pre-mortem (one Tier 1 model of another vendor)
 
@@ -90,6 +93,16 @@ Fill the `Pre-mortem` table of `PLAN.md` with the reason, its guardrail and wher
 
 Show the updated plan (goal, KPIs, ticket table, pre-mortem table, open decisions). Iterate until the user says it is approved. Each change the user asks for, or agrees to after one of your questions, is logged with `--source user:"<their words>"` and `--by <owner>` in the same step as the edit; show the new Decision log rows with the updated plan, so the user sees what was recorded in their name. Record "Plan approved by <owner> on <date>" and "Pre-mortem reviewed by <models>" in the Approval section. If the user changes the scope materially after the pre-mortem, rerun step 2 on the changed parts (`--only-pass 1` is enough for a small delta).
 
+## 5b. Human prerequisites gate (nothing created while one is missing)
+
+The run is unattended: a missing account or key found at 3 a.m. stops a ticket, and often everything behind it, until the owner wakes up. So before any ticket is written to Linear:
+1. **Rebuild the list from the approved plan.** The pre-mortem and the review loop added tickets: walk every ticket again, add the rows they need, and ask for the new ones in one message.
+2. **Verify each row yourself.** Run its verify command (a login check, a one-call API ping, `dig`, a `test -s`); mark it `provided` with the date only when the command passes. "The owner says it is done" is not verified. Never echo a secret to check it.
+3. **A row the owner cannot provide today is deferred, never left open.** Ask for the fallback (a mock, a sandbox, a stub behind a flag, a preview URL), name the tickets held back, give them `blocked_by` so they are scheduled last, and say when the owner expects to provide it. Log it: `bin/decision add --change "H<n> deferred: <fallback>" --source user:"<their words>" --by <owner> --affects "<slugs>"`.
+4. **Stop while any row is `missing`.** No `tickets.json`, no Linear project. Tell the owner which rows are left and what each blocks.
+
+A prerequisite found after this gate is a planning defect: add the row, log the decision, and say so.
+
 ## 6. Ticket breakdown file
 
 Write `.autopilot/plan/tickets.json` (format in `bin/linear --help`): project name, description (one paragraph) and content (the whole `PLAN.md`), milestones (name, `id` slug, description with its KPIs), and every ticket with slug, title, markdown description, milestone, estimate (S=1 or M=2; L is refused: split it), `touches` (files or modules it changes), priority, `blocked_by` slugs and labels. Each ticket description carries: precise instructions, `CHECKS:` line, `**Acceptance**`, the guardrails that apply (with their PM ids), what not to touch, and the notes it builds on. The run skill rewrites them into ticket files, so write them as instructions for a cheap implementer, not as user stories.
@@ -107,7 +120,7 @@ From now on, a change of plan reaches Linear as well as `PLAN.md`: re-sync the p
 
 - Commit `PLAN.md` on a branch `autopilot/<project-slug>` if the user agrees (ask; the user is here). Add `.autopilot/` to `.git/info/exclude`.
 - Seed `<repo>/.autopilot/state.json` from `templates/state.json`: project, project id, team, branch, push, checks, coordinator. Then `bin/milestone seed .autopilot/plan/tickets.json`: `milestones`, `blockers`, `sizes`, `queue`, `stages` and `critical_path` from the plan (with MCP tools, write `tickets.created.json` in the same format first). Then `bin/milestone sync`: target dates and the first milestone bars in Linear.
-- Tell the user, in a few lines: the Linear project link, the number of tickets and milestones, the top three failure reasons and their guardrails, and that `/maxxfactory-run` will execute it.
+- Tell the user, in a few lines: the Linear project link, the number of tickets and milestones, the top three failure reasons and their guardrails, the human prerequisites deferred (what each holds back, and when the owner said they would provide it), and that `/maxxfactory-run` will execute it.
 
 ## Extending a project (tickets or a milestone added later)
 
@@ -120,5 +133,6 @@ When a plan is folded into an existing project as a milestone, the Linear projec
 - You plan; you never implement during this phase. Reading the repo is allowed, editing code is not.
 - Pre-mortem reviewers are read-only; `premortem` restores the tree if one of them changes it.
 - Keep each reviewer's full output on disk (`.autopilot/plan/premortem-<key>-<pass>.md`) and never paraphrase a reason into something weaker than the reviewer wrote.
+- No human prerequisite left open: every `H` row is `provided` (verified by its command) or `deferred` (fallback, held-back tickets, decision logged) before anything is created in Linear. Secrets go through `! pbcopyenv`, never through the chat.
 - No decision unsourced: a `PLAN.md` change without its Decision log row, or a row still `pending` in Linear, is a defect to fix before anything else.
 - Budget: the pre-mortem is one of the few places where Tier 1 models are spent on purpose (with plan reviews, milestone reviews and coordination). One reviewer, two passes, once per plan (plus one rerun on a material change). Never pay for extra credits to run it: wait for a reset instead (`bin/run-model wait premortem`).

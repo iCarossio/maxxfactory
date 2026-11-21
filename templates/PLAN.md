@@ -83,6 +83,14 @@ concern). A milestone added later goes through `bin/milestone add`, which append
 ## Rules for implementers and reviewers
 - <project-specific rules derived from the guardrails: forbidden shortcuts, required tests, data sampled from real inputs>
 
+## Human prerequisites
+Everything only a human can do, asked in one batch before the Linear project exists, so the run never waits for it: accounts, API keys and tokens, OAuth apps, paid plans, DNS, access grants, real data or exports, devices, sign-offs. Not listed here: anything an agent can do with the access it already has. Secrets are handed over with `! pbcopyenv <NAME>` (into `.env`, never pasted in the chat); "How verified" is a command that proves it works without printing the value. Status: `provided` (verified on <date>), or `deferred` (the owner's words, the fallback shipped meanwhile, and the tickets held back, which are scheduled last). Nothing stays `missing` at approval.
+
+| # | What the owner provides | Needed by (tickets) | How handed over | How verified (command -> expected) | Status |
+|---|---|---|---|---|---|
+| H1 | <e.g. Stripe test-mode secret key> | <billing-api, billing-e2e> | `! pbcopyenv STRIPE_SECRET_KEY` | `bin/check-stripe` -> exit 0 | missing |
+| H2 | <e.g. DNS record for app.example.com> | <deploy> | owner adds the CNAME | `dig +short app.example.com` -> the target | deferred: "IT does it Monday"; fallback: preview URL; holds back `deploy` |
+
 ## Open human decisions
 - <decision, safe default shipped meanwhile, who decides>
 
