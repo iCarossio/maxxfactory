@@ -671,7 +671,11 @@ def on_run(t, v, st, c):
                           findings=res.get('out')):
                 log('%s r%s: implementer BLOCKED -> coordinator (%s)' % (t, r, notes[:200]))
             return
-        if not round_changed(wt, v, st['branch']):
+        # A fix round that changed nothing but reports `done` on a tree that holds the ticket's work goes on to
+        # checks and review: the earlier rounds may already satisfy the findings (2026-11-20: a correct no-op round
+        # was sent to triage). Only an empty tree, or a no-op round that does not claim done, is a dead round.
+        noop_ok = status == 'done' and r > 1 and tree_changed(wt, st['branch'])
+        if not noop_ok and not round_changed(wt, v, st['branch']):
             if not v.get('empty_retry'):
                 if transition(t, stage, r, tries=0, empty_retry=1, stage_at=lib.now().isoformat()):
                     log('%s r%s: %s ok but changed nothing -> dispatched again one tier up' % (t, r, name))

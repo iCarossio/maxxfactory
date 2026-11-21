@@ -1160,12 +1160,16 @@ echo noop > $PLD/impl.mode; $PL start Q-2 >/dev/null 2>&1; TICK
 check "empty diff -> the same round again one tier up (--role escalate)" "$(ST Q-2) $(tail -1 $PLD/rm.log | grep -c 'Q-2-impl-1.md .*--role escalate')" "1 implement 1"
 TICK; rm $PLD/impl.mode
 check "empty diff twice -> triage" "$(ST Q-2) $(grep -c '^Q-2 r1 triage: round 1 changed nothing twice' $PR/.autopilot/pipeline/attention.txt)" "1 triage 1"
+QT Q-10 src/Q-10.ts; git worktree add -q -b autopilot/Q-10 $SCR/prepo-wt/Q-10 HEAD; $PL start Q-10 >/dev/null 2>&1
+echo 1 > $PLD/review.rcs; TICK; echo noop > $PLD/impl.mode; TICK; TICK; rm -f $PLD/impl.mode $PLD/review.rcs
+check "a fix round that changed nothing but reports done on a tree with work -> checks and review, not triage" "$(ST Q-10)" "2 review"
+$H/bin/state del inflight.Q-10 >/dev/null
 W5Q=$SCR/prepo-wt/Q-5; echo q5 > $W5Q/q5.txt
 $H/bin/state set inflight.Q-5 "{\"wt\": \"$W5Q\", \"round\": 1, \"stage\": \"review\", \"stage_at\": \"2020-01-01T00:00:00+00:00\"}" >/dev/null
 printf '@@pipeline START x\n@@pipeline CHECK_OK\n@@pipeline REVIEW_RC 1\n@@pipeline DONE\n' > $PR/.autopilot/pipeline/Q-5-1.check
-echo "- [fk-d] major q5.txt:1 wrong" > $O/Q-5-findings-1.md; echo noop > $PLD/impl.mode; TICK; TICK
-check "fix round that changes nothing (tree already dirty) -> again one tier up" "$(ST Q-5) $(tail -1 $PLD/rm.log | grep -c 'Q-5-impl-2.md .*--role escalate')" "2 implement 1"
-TICK; rm $PLD/impl.mode
+echo "- [fk-d] major q5.txt:1 wrong" > $O/Q-5-findings-1.md; echo noop > $PLD/impl.mode; echo partial > $PLD/impl.status; TICK; TICK
+check "fix round that changes nothing and does not claim done (tree already dirty) -> again one tier up" "$(ST Q-5) $(tail -1 $PLD/rm.log | grep -c 'Q-5-impl-2.md .*--role escalate')" "2 implement 1"
+TICK; rm $PLD/impl.mode $PLD/impl.status
 check "fix round empty twice -> triage" "$(ST Q-5)" "2 triage"
 $H/bin/state del inflight.Q-5 >/dev/null; rm -f $W5Q/q5.txt
 $H/bin/state set checks_fast '["test ! -e FASTFAIL"]' >/dev/null; $H/bin/state set checks '["test ! -e FULLFAIL"]' >/dev/null
