@@ -31,7 +31,7 @@ Any other stage (plan, hold, ...) is left alone. triage and stuck tickets are li
 Fix rounds go through `run-model run implement --role fix` with the brief <ISSUE>-impl-<n>.md, so run-model's
 automatic escalation after round 3 applies. Every fix brief ends with the rule that the full checks must pass.
 Settings: state.json `pipeline` {interval 60, max_jobs 3, max_rounds 5, max_merges 3, review_retries 3,
-impl_retries 3, retry_minutes 10, check_timeout_minutes 60}. Log: .autopilot/pipeline/pipeline.log.
+impl_retries 3, retry_minutes 10, check_timeout_minutes 60, check_silence_minutes 25}. Log: .autopilot/pipeline/pipeline.log.
 Tests: PIPELINE_SYNC=1 runs every dispatch in the foreground; PIPELINE_RUN_MODEL, PIPELINE_REVIEW, PIPELINE_FINISH
 (any bin script name) replace that script.
 """
@@ -42,7 +42,7 @@ import autopilot_lib as lib
 
 SELF = os.path.realpath(__file__)
 DEFAULTS = {'interval': 60, 'max_jobs': 3, 'max_rounds': 5, 'max_merges': 3, 'review_retries': 3, 'impl_retries': 3,
-            'retry_minutes': 10, 'check_timeout_minutes': 60}
+            'retry_minutes': 10, 'check_timeout_minutes': 60, 'check_silence_minutes': 25}
 DRIVEN = ('implement', 'merge', 'rebase', 'review')
 GRACE = 90  # seconds before a run or job with no process and no result counts as dead (dispatch races)
 MARK = '@@pipeline '  # marker lines of a .check file; check output never starts with it
@@ -102,8 +102,33 @@ def job_alive(t, r):
     return False
 
 
+def kill_job(t, r):
+    """Stops this project's check + review job of a ticket round, with its process group."""
+    out = subprocess.run(['ps', '-ax', '-o', 'pid=,command='], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        pid, _, cmd = line.strip().partition(' ')
+        a = cmd.split()
+        if '_job' in a and SELF in cmd:
+            i = a.index('_job')
+            if a[i + 1:i + 3] == [t, str(r)]:
+                try:
+                    os.killpg(os.getpgid(int(pid)), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, ValueError):
+                    pass
+
+
 def jobs_running():
-    return STARTED[0] + sum(1 for c in procs() if '_job' in c.split() and SELF in c)
+    # Count only this project's jobs: several projects run the same pipeline script on one machine,
+    # and another project's check jobs must not take this project's max_jobs slots (2026-11-20).
+    own = set(lib.load_state(M).get('inflight', {}))
+    n = 0
+    for c in procs():
+        a = c.split()
+        if '_job' in a and SELF in c:
+            i = a.index('_job')
+            if i + 1 < len(a) and a[i + 1] in own:
+                n += 1
+    return STARTED[0] + n
 
 
 def spawn(argv, out=None, extra_env=None):
@@ -390,8 +415,19 @@ def on_review(t, v, st, c):
     ck = check_path(t, r)
     mk = marks(ck)
     if 'DONE' not in mk:
-        if job_alive(t, r) or age(v) < GRACE:
+        wt = wt_of(st, t, v)
+        alive = job_alive(t, r)
+        # A check that writes nothing for check_silence_minutes is hung (a test waiting forever, or orphans of a
+        # runner that died and took its timeout with it). The review phase after CHECK_OK is bounded by run-model.
+        silent = time.time() - os.path.getmtime(ck) if os.path.exists(ck) else 0
+        if alive and 'CHECK_OK' not in mk and silent > c.get('check_silence_minutes', 25) * 60:
+            kill_job(t, r)
+            log('%s r%s: check silent for %d min, job and worktree processes stopped (%d)'
+                % (t, r, silent // 60, len(lib.reap_worktree(wt))))
+            alive = False
+        if alive or age(v) < GRACE:
             return
+        lib.reap_worktree(wt)  # orphans of the dead job must not keep running beside its rerun
         tries = int(v.get('tries') or 0)
         if tries >= c['review_retries']:
             stuck(t, 'review', r, 'the check + review job died %d times without a result (%s)' % (tries + 1, ck)); return

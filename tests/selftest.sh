@@ -1148,4 +1148,8 @@ OUT=$($PL start P-warn 2>&1); RC=$?
 check "start: Linear failure warns and does not block" "$RC $(echo "$OUT" | grep -c 'WARNING Linear state') $(ST P-warn)" "0 1 1 implement"
 unset AUTOPILOT_REPO PIPELINE_SYNC PIPELINE_RUN_MODEL PIPELINE_REVIEW
 check "opencode adapter disables the websearch tool (headless runs cannot answer its prompt)" "$(python3 -c "import json;e=json.load(open('$H/harnesses/opencode.json'))['run']['env'];print(json.loads(e['OPENCODE_CONFIG_CONTENT'])['tools']['websearch'])")" "False"
+RW=$SCR/reap-wt; mkdir -p $RW/web; (cd $RW/web && exec sleep 300) & RSP=$!; sleep 0.5
+OUT=$(python3 -c "import sys; sys.path.insert(0, '$H/bin'); import autopilot_lib as l; print(len(l.reap_worktree('$RW')))"); sleep 0.5
+check "reap_worktree stops a process left running in a worktree (leaked servers, orphaned checks)" "$OUT $(kill -0 $RSP 2>/dev/null && echo alive || echo gone)" "1 gone"
+wait $RSP 2>/dev/null
 echo "=== $PASS passed, $FAIL failed"

@@ -5,7 +5,7 @@ Config: $AUTOPILOT_CONFIG_DIR (default ~/.config/maxxfactory): models.json (rost
 harnesses/ (adapter overrides), prompts/ (template overrides). Per project: <repo>/.autopilot/state.json.
 Python 3.9+ (no match statements, no nested same-quote f-strings).
 """
-import contextlib, datetime as dt, fcntl, fnmatch, glob, hashlib, json, os, re, shutil, subprocess, sys, tarfile, tempfile
+import contextlib, datetime as dt, fcntl, fnmatch, glob, hashlib, json, os, re, shutil, signal, subprocess, sys, tarfile, tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 HOME = os.path.dirname(HERE)
@@ -1161,3 +1161,45 @@ def ticket_shape_errors(tickets, deps=None):
                 errs.append(f'{a} and {b} can run in parallel but both change {", ".join(hit)}: order them with '
                             f'blocked_by, or split so each file has one owner per stage')
     return errs
+
+
+def worktree_processes(path):
+    """Process ids whose working directory is `path` or below it (servers, browsers, test runners a
+    ticket's checks started there). One `lsof` pass over every process's cwd; empty when lsof fails."""
+    root = os.path.realpath(path).rstrip('/') + '/'
+    try:
+        out = subprocess.run(['lsof', '-a', '-d', 'cwd', '-Fpn'], capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    pids, pid = [], None
+    for line in out.splitlines():
+        if line.startswith('p'):
+            pid = int(line[1:])
+        elif line.startswith('n') and pid and pid != os.getpid():
+            cwd = os.path.realpath(line[1:]).rstrip('/') + '/'
+            if cwd.startswith(root):
+                pids.append(pid)
+    return pids
+
+
+def reap_worktree(path, sig=signal.SIGTERM):
+    """Stops every process running in a worktree, with its process group. Called before a worktree is
+    removed and before a check is restarted: a removed worktree must not leave servers, browsers or a
+    hung test run behind (2026-11-20: 13 leaked next-server processes and 7 orphaned checks drove the
+    load past 300 and blocked every check for an hour). Returns the pids signalled."""
+    pids = worktree_processes(path)
+    inside, done = set(pids), []
+    me = os.getpgid(0)
+    for pid in pids:
+        try:
+            pg = os.getpgid(pid)
+            # A whole group goes only when its leader also runs in the worktree and it is not our own group:
+            # a stray process must never take an unrelated group (the coordinator's shell, a test runner) with it.
+            if pg in inside and pg != me:
+                os.killpg(pg, sig)
+            else:
+                os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            continue
+        done.append(pid)
+    return done

@@ -38,6 +38,9 @@ if [ -d "$WT" ]; then
   RANGE=$(git rev-list --count "$BASE..HEAD")
   [ "$RANGE" -gt 0 ] || { echo "finish: nothing to integrate for $ID (no changes, no commits ahead of $BRANCH)"; exit 1; }
   cd "$M"; git cherry-pick "$BASE..$WTBRANCH" >/dev/null || { echo "CONFLICT $ID"; git diff --name-only --diff-filter=U; exit 3; }
+  # Stop what the ticket's checks left running in the worktree (servers, browsers, test runners) before removing it:
+  # a removed worktree must not leave processes behind (2026-11-20: 13 leaked next-server processes).
+  python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import autopilot_lib as l; print("reaped", len(l.reap_worktree(sys.argv[2])))' "$(cd "$(dirname "$0")" && pwd)" "$WT" || true
   git worktree remove --force "$WT"; git branch -q -D "$WTBRANCH"
 elif [ "${NO_WT:-}" = 1 ]; then
   cd "$M"; git add -A; commit
