@@ -143,6 +143,22 @@ Then run `/maxxfactory-init`. Requires Python 3.9+, git, a Linear workspace, and
 
 Upgrading from `linear-autopilot`: run `./install.sh` again from the renamed clone (see above); an existing `~/.config/linear-autopilot/` keeps working until you rename it to `~/.config/maxxfactory/`.
 
+## Passing a secret to a session
+
+An agent often needs a token (an API key for the app under test, `LINEAR_API_KEY`, ...). Pasting it in the chat puts it in the conversation and in the logs. `pbcopyenv` writes it from the clipboard straight into the project's `.env` instead: copy the secret, then type in the session, with the `!` prefix that runs a shell command:
+
+```
+! pbcopyenv MY_SUPER_TOKEN_NAME
+```
+
+That appends `MY_SUPER_TOKEN_NAME=<clipboard>` to `.env` in the current folder (created if missing, readable by you only) and prints only `pbcopyenv: added MY_SUPER_TOKEN_NAME to <path>`, never the value. It refuses an empty or multi-line clipboard and warns when the name is already in the file. Keep `.env` in `.gitignore`.
+
+`/maxxfactory-init` offers to install it. By hand (zsh on macOS), from the clone, then open a new terminal and a new session:
+
+```bash
+echo "source $PWD/shell/pbcopyenv.zsh" >> ~/.zshrc
+```
+
 ## Layout
 
 ```
@@ -153,6 +169,7 @@ prompts/     briefs for implementers, reviewers and the pre-mortem
 templates/   example roster, state, plan and ticket
 references/  lessons from real runs
 tests/       behavioural suite against a fake harness (no quota spent)
+shell/       pbcopyenv, a zsh helper that puts a secret from the clipboard into .env
 ```
 
 ## License
