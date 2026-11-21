@@ -256,7 +256,8 @@ def impl_report(res, name):
     text = open(p, errors='ignore').read() if os.path.exists(p) else ''
     s = re.findall(r'^\W*STATUS:\W*(\w+)', text, re.M)
     n = re.search(r'^\W*NOTES:(.*)', text, re.M | re.S)
-    return (s[-1].lower() if s else ''), (n.group(1).strip()[:600] if n else '')
+    # One line: the reason lands in attention.txt, one line per ticket.
+    return (s[-1].lower() if s else ''), (' '.join(n.group(1).split())[:600] if n else '')
 
 
 def tree_changed(wt, branch):
@@ -490,7 +491,8 @@ def fix_round(t, v, st, c, body, src, expect='review', forced=False):
         with open(fp, 'w') as f:
             f.write(body + '\n')
         if transition(t, expect, r, stage='triage', why='%s after round %s of %s; findings: %s' % (src, r, c['max_rounds'], fp),
-                      findings=fp):
+                      findings=fp, nfind=nf if nf is not None else v.get('nfind')):
+            # nfind is kept so a coordinator round (`pipeline fix`) still lets the next review count as converging.
             log('%s r%s: %s -> TRIAGE (round %s reached)' % (t, r, src, c['max_rounds']))
         return
     fx = os.path.join(OUT, '%s-fix-%s.md' % (t, n))
@@ -905,6 +907,7 @@ def cmd_fix(t, findings):
         fix_round(t, v, st, cfg(st), open(findings).read(), 'coordinator findings', expect=v.get('stage'), forced=True)
     except Stop as e:
         sys.exit('pipeline fix: %s' % e)
+    sync_attention(lib.load_state(M))  # a settled triage must not wake wait-approval again before the next tick
     v = lib.load_state(M)['inflight'][t]
     print('%s round %s %s' % (t, rnd(v), v.get('stage')))
 
@@ -935,6 +938,7 @@ def cmd_retry(t):
         start_job(t, r, wt, 'review', review_only='CHECK_OK' in marks(check_path(t, r)))
     else:
         transition(t, 'stuck', r, stage='rebase', tries=0, merges=0, why=None, stuck_from=None)
+    sync_attention(lib.load_state(M))
     log('%s r%s: retry %s (coordinator)' % (t, r, frm))
     print('%s r%s: %s again' % (t, r, frm))
 
