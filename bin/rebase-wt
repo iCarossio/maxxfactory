@@ -21,7 +21,10 @@ LOCK="$GITDIR/autopilot-rebase.lock"
 for i in $(seq 1 600); do mkdir "$LOCK" 2>/dev/null && break; sleep 1; [ "$i" = 600 ] && { echo "rebase-wt: lock held for 10 min: $LOCK"; exit 1; }; done
 trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 # The first entry of `git worktree list` is the main checkout, which sits on the project branch.
-BRANCH=${2:-$(git worktree list --porcelain | awk '/^branch /{print $2; exit}' | sed 's#refs/heads/##')}
+# Prefer the project branch recorded in state.json (main checkout = parent of the common git dir): the project may
+# live in a secondary worktree.
+STATE_BRANCH=$(r=${AUTOPILOT_REPO:-}; [ -z "$r" ] && r=$(dirname "$(cd "$GITDIR" && pwd)"); [ -f "$r/.autopilot/state.json" ] && python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('branch',''))" "$r/.autopilot/state.json" 2>/dev/null || true)
+BRANCH=${2:-${STATE_BRANCH:-$(git worktree list --porcelain | awk '/^branch /{print $2; exit}' | sed 's#refs/heads/##')}}
 TAG="rebase-wt-$(basename "$W")-$$-$(date +%s)"
 unmerged() { git diff --name-only --diff-filter=U; }
 in_rebase() { [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; }
