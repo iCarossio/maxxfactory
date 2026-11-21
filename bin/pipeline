@@ -217,9 +217,28 @@ def ticket_line(t, key):
     return mt.group(1).strip() if mt and mt.group(1).strip() else None
 
 
+def shell_line(t, key):
+    """A ticket's `CHECKS:`/`CHECKS_FAST:` line, only when it parses as a shell command (`bash -n`). Planners sometimes
+    write prose there ("just check (and the named tests: x.py)"): on 2026-11-20 that line reached the full checks as a
+    command, bash failed on the parenthesis, and an approved ticket went to triage for a syntax error that was not its
+    own. A line that does not parse is ignored (logged once per ticket and key) and the project's checks apply."""
+    line = ticket_line(t, key)
+    if not line:
+        return None
+    if subprocess.run(['bash', '-n', '-c', line], capture_output=True).returncode == 0:
+        return line
+    if (t, key) not in _BAD_LINES:
+        _BAD_LINES.add((t, key))
+        log('%s: ignoring %s line that is not a shell command: %s' % (t, key, line[:120]))
+    return None
+
+
+_BAD_LINES = set()
+
+
 def checks_of(st, t):
     """The full checks: the ticket's `CHECKS:` line, else state.json `checks`."""
-    line = ticket_line(t, 'CHECKS')
+    line = shell_line(t, 'CHECKS')
     return [line] if line else list(st.get('checks', []))
 
 
@@ -229,7 +248,7 @@ def fast_checks_of(st, t):
     its review, and the full checks run once, after the review approves (stage `final`), `max_full_jobs` at a time:
     on 2026-11-20 ten full suites (unit + build + e2e, 25 min each) ran at once on one machine and unrelated tests
     timed out, sending tickets to triage for failures that were not theirs."""
-    line = ticket_line(t, 'CHECKS_FAST')
+    line = shell_line(t, 'CHECKS_FAST')
     if line:
         return [line]
     return list(st['checks_fast']) if st.get('checks_fast') else None

@@ -1140,6 +1140,13 @@ def ticket_shape_errors(tickets, deps=None):
                         f'["api/app.py", "web/src/components/drawer/"])')
         elif len(touches) > MAX_TICKET_TOUCHES:
             errs.append(f'{s}: touches {len(touches)} files or modules (max {MAX_TICKET_TOUCHES}): split it')
+        # The pipeline runs a ticket's CHECKS line as a shell command; prose there ("just check (and the named
+        # tests: x.py)") sent an approved ticket to triage on 2026-11-20 with a bash syntax error.
+        for m in re.finditer(r'^(CHECKS(?:_FAST)?):(.*)$', str(t.get('description') or ''), re.M):
+            cmd = m.group(2).strip()
+            if cmd and subprocess.run(['bash', '-n', '-c', cmd], capture_output=True).returncode != 0:
+                errs.append(f'{s}: the {m.group(1)} line is not a shell command (`{cmd[:80]}`): write the exact '
+                            f'command, and put any explanation on another line')
 
     def ancestors(s, seen=None):
         seen = set() if seen is None else seen
