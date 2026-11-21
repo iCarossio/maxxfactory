@@ -5,6 +5,8 @@ the architecture decision when the ticket shapes the project, what not to touch 
 shared docs), its own port and container name if it starts a server, and the notes of the tickets it builds on (docs/notes/<ISSUE>.md).>
 
 CHECKS: <command && command>
+CHECKS_FAST: <optional: what implementers run each round when the project has two-level checks; else state.json checks_fast>
+Touches: `<path>`, `<path>` <the files or folders this ticket may change; parallel tickets must not overlap>
 
 **Acceptance**
 - <criterion verifiable by the CHECKS line or a named test>

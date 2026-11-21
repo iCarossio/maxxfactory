@@ -159,8 +159,18 @@ Symptom: a ticket burns all 5 rounds in about 12 minutes with `CHANGED: none` ea
 ## A blocked round with no changes still went to checks and review (2026-11-17)
 Symptom: `ATTENTION: ... stuck: bin/review exit 3` after round 1; the worktree held only reviewer junk. The implementer had answered `STATUS: blocked, CHANGED: none` (it needed two files outside its touches), yet the pipeline ran the checks and a review on the empty diff; the reviewer started a local server and the tree restore failed.
 Fix in the moment: read `<ISSUE>-impl-<n>.md` first. When the round is blocked on a scope question, widen the touches (decision), remove the junk under `.tmp/`, and `pipeline fix <ISSUE> <coordinator findings>`.
-Better: the pipeline should route `STATUS: blocked` with no changes to `attention.txt` instead of checks and review.
+Since 2026-11-20 the pipeline routes `STATUS: blocked` to triage before any check or review.
 
-## Orphaned check runs hang for hours (2026-11-20, Escape Purple)
-Symptom: `pipeline status` showed 7 tickets stuck in `checks` for up to 6 h; no `.check` file had been written for an hour; `just check` and `pytest -n 4` processes at 0% CPU, all children of a dead check runner. The pipeline's `check_timeout_minutes` (60) never fired, because the runner holding the timer had died (machine load above 300 earlier that day). Effect: no check could finish, the machine stayed loaded, and leaked `next-server` processes from merged worktrees added up (13 stopped by hand).
-Fix applied: kill every `just check` process group older than 75 min at each heartbeat, and stop `next-server` processes whose working directory is a merged ticket's worktree. To do in the harness: a check watchdog that does not depend on the runner staying alive (record the process group id and start time in the `.check` file, and let `pipeline run` kill overdue groups on each tick), and let `finish` stop the processes started in a worktree before removing it.
+## Orphaned check runs hang for hours (2026-11-20)
+Symptom: `pipeline status` showed 7 tickets stuck in `checks` for up to 6 h; no `.check` file had been written for an hour; check and `pytest -n 4` processes at 0% CPU, all children of a dead check runner. The pipeline's `check_timeout_minutes` (60) never fired, because the runner holding the timer had died (machine load above 300 earlier that day). Effect: no check could finish, the machine stayed loaded, and leaked dev-server processes from merged worktrees added up (13 stopped by hand).
+What the runtime does now: `pipeline run` stops a check that wrote nothing for `check_silence_minutes` (25) on each tick, whoever started it, and reaps every process whose working directory is the ticket's worktree before a rerun; `finish` reaps the worktree's processes before removing it (`lib.reap_worktree`).
+
+## Rounds that could not succeed still paid checks and a review (2026-11-20)
+Symptom: tickets came back `STATUS: blocked` or with an empty diff, and each still ran a full check and a review (about an hour) to learn nothing; ten full suites (unit, build, end-to-end, 25 min each) ran at once and unrelated tests timed out, sending tickets to triage for failures that were not theirs; other projects' check jobs on the same machine filled this project's `max_jobs`; most triages at round 5 were settled with "one more round"; later reviews raised new findings on code earlier rounds had passed.
+What the runtime does now:
+- `STATUS: blocked` goes to triage at once; a round that changed nothing is run again one tier up, then goes to triage.
+- Two-level checks (`checks_fast` in state.json or `CHECKS_FAST:` in the ticket): fast checks each round, the full suite once after the review approves (stage `final`, `max_full_jobs` at a time).
+- Check slots count this project's jobs only.
+- Past `max_rounds`, a review with fewer findings than the previous one goes on by itself, up to `max_rounds_hard`.
+- The review brief lists what the round was asked to fix: later rounds verify those first and block only on regressions, real defects and unmet acceptance criteria.
+- Opt-in: `auto_start` (queued tickets whose blockers are merged and whose `Touches` do not overlap start alone) and `auto_merge` (approved tickets are merged by the loop).

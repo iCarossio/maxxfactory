@@ -22,7 +22,9 @@ You are the implementer. Another model will adversarially review your diff, so b
 - Run checks in the foreground and wait for them. Never end your session while a check runs in the background: when you stop, your final message must already contain the STATUS block with the real results.
 - Do NOT commit, push, open PRs, or touch git history. Do not edit files outside the working directory, except in any other worktree the ticket names explicitly as yours (a ticket that spans two repos lists both under "Worktrees"): those are working directories too.
 - Do not delete or rewrite data/fixtures/snapshots unless the ticket says so.
-- If something is ambiguous or blocked, do the safe subset and say exactly what is missing.
+- If something is ambiguous or blocked, do the safe subset and say exactly what is missing. When the ticket cannot be done inside its `Touches` (a shared type, component or file another ticket owns), stop at once with `STATUS: blocked` and name the file and the change you need: the pipeline hands that to the coordinator straight away, while a guess costs a full review round.
+- When the ticket names a reference ticket or a reference implementation, copy its pattern (props, file layout, tests, screenshots) instead of designing your own.
+- A test outside your ticket that fails or times out is not yours to patch (no per-test timeouts, no edits to unrelated test files): report it in NOTES.
 - Implement the behaviour for real: never copy expected outputs, fixtures or snapshots into the product, never hard-code test answers, never ship test-only code in the product (e.g. behaviour keyed on navigator.webdriver or a test env var). Fix test-environment differences in the test harness.
 - Fix causes in shared code (generators, engines, pipelines) rather than in generated files, which get overwritten on the next run.
 - Do not weaken tests, thresholds or baselines to make a check pass.

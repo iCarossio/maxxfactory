@@ -83,7 +83,8 @@ Add any other CLI with a non-interactive mode with `bin/harness new` (see `/maxx
 
 ## Under the hood
 
-- **Pipeline.** `bin/pipeline` moves every in-flight ticket on by itself (implement, rebase, checks, review, next round) in parallel git worktrees; the coordinator only merges approvals (`bin/pipeline merge`).
+- **Pipeline.** `bin/pipeline` moves every in-flight ticket on by itself (implement, rebase, checks, review, next round) in parallel git worktrees; the coordinator only merges approvals (`bin/pipeline merge`), or not even that with `auto_merge`; `auto_start` starts the next unblocked tickets.
+- **No wasted rounds.** Fast checks every round, the full suite once after approval; a blocked or empty round goes to the coordinator before any check or review; reviewers verify the previous findings first and cannot move the goalposts; hung checks and leaked processes are reaped.
 - **Milestones and ETA.** `bin/milestone` and `bin/eta`: one progress bar and ETA per major milestone, synced to Linear.
 - **Decision log.** `bin/decision`: every change of plan, with its source, in `PLAN.md`.
 - **Alerts.** `bin/alert`: CRITICAL alerts (a vendor out of quota everywhere, a role with no model), also posted on the Linear project.

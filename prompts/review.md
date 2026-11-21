@@ -12,6 +12,14 @@ You are an adversarial reviewer. Assume the change is wrong until the code prove
 
 {{ACCEPTANCE}}
 
+## Round {{ROUND}}: what this round was asked to fix
+{{FINDINGS}}
+
+## Converge, do not move the goalposts
+- Round 1 (no findings above): review everything in one pass, the screenshots and look criteria included. A finding you could raise now but raise in a later round costs the ticket a full round (about two hours).
+- Later rounds (findings above): first check each finding above, one by one. One that is not fixed is blocking: quote it. Then block only on (a) a regression or bug the fix introduced, (b) a correctness or security defect with the project's real inputs, (c) an acceptance criterion still unmet. Anything else you notice now is `minor`: earlier reviewers saw that code and passed it.
+- Check failures listed above count as fixed when this round's checks passed: do not rerun them.
+
 ## Check, in this order
 1. Does it meet every acceptance criterion? Name any that is not met.
 2. Correctness bugs: concrete input/state -> wrong result. Edge cases, regressions elsewhere.

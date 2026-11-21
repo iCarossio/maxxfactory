@@ -1020,10 +1020,10 @@ esac
 if [[ $N =~ -impl-[0-9]+m[0-9]+$ ]]; then
   cp "$PLD/resolve.txt" a.txt; git add a.txt
   if [ -d "$(git rev-parse --git-path rebase-merge)" ]; then GIT_EDITOR=true git -c user.email=t@t -c user.name=t rebase --continue >/dev/null 2>&1; fi
-else
+elif [ "$(cat $PLD/impl.mode 2>/dev/null)" != noop ]; then
   echo "impl $N" >> "$(cat $PLD/impl.file 2>/dev/null || echo work-$ISS.txt)"
 fi
-echo "STATUS: done" > "$OUT"
+printf 'STATUS: %s\nNOTES: %s\n' "$(cat $PLD/impl.status 2>/dev/null || echo done)" "need lib/shared.ts" > "$OUT"
 echo "run-model: some stderr line"
 echo "{\"model\": \"fk-c\", \"level\": 3, \"status\": \"ok\", \"run_role\": \"fix\", \"issue\": \"$ISS\", \"out\": \"$OUT\"}"
 EOF
@@ -1146,6 +1146,57 @@ printf '# P-warn\n\nDo it.\n\n**Acceptance**\n- works\n' > .autopilot/tickets/P-
 git worktree add -q -b autopilot/P-warn $SCR/prepo-wt/P-warn HEAD
 OUT=$($PL start P-warn 2>&1); RC=$?
 check "start: Linear failure warns and does not block" "$RC $(echo "$OUT" | grep -c 'WARNING Linear state') $(ST P-warn)" "0 1 1 implement"
+echo "--- pipeline: blockers on start, dead rounds, two-level checks, converging reviews, auto start and merge"
+QT() { printf '# %s title\n\nDo it.\n\nTouches: `%s`, `tests/`\n\n**Acceptance**\n- works\n' $1 $2 > .autopilot/tickets/$1.md; }
+$H/bin/state set inflight '{}' >/dev/null; : > $PR/.autopilot/pipeline/approved.txt; rm -f $PLD/review.rcs
+for q in Q-1 Q-2 Q-3 Q-4 Q-5; do QT $q src/$q.ts; git worktree add -q -b autopilot/$q $SCR/prepo-wt/$q HEAD; done
+$H/bin/state set blockers '{"Q-2": ["Q-9"]}' >/dev/null
+OUT=$($PL start Q-2 2>&1); RC=$?
+check "start refuses a ticket whose blockers are not merged" "$RC $(echo "$OUT" | grep -c 'blocked by Q-9')" "1 1"
+$H/bin/state set blockers '{}' >/dev/null
+echo blocked > $PLD/impl.status; $PL start Q-1 >/dev/null 2>&1; TICK; rm $PLD/impl.status
+check "implementer STATUS: blocked -> triage at once, no checks, no review" "$(ST Q-1) $(grep -c '^Q-1 r1 triage: implementer blocked in round 1: need lib/shared.ts' $PR/.autopilot/pipeline/attention.txt) $(test -e $PR/.autopilot/pipeline/Q-1-1.check && echo checked || echo none)" "1 triage 1 none"
+echo noop > $PLD/impl.mode; $PL start Q-2 >/dev/null 2>&1; TICK
+check "empty diff -> the same round again one tier up (--role escalate)" "$(ST Q-2) $(tail -1 $PLD/rm.log | grep -c 'Q-2-impl-1.md .*--role escalate')" "1 implement 1"
+TICK; rm $PLD/impl.mode
+check "empty diff twice -> triage" "$(ST Q-2) $(grep -c '^Q-2 r1 triage: round 1 changed nothing twice' $PR/.autopilot/pipeline/attention.txt)" "1 triage 1"
+W5Q=$SCR/prepo-wt/Q-5; echo q5 > $W5Q/q5.txt
+$H/bin/state set inflight.Q-5 "{\"wt\": \"$W5Q\", \"round\": 1, \"stage\": \"review\", \"stage_at\": \"2020-01-01T00:00:00+00:00\"}" >/dev/null
+printf '@@pipeline START x\n@@pipeline CHECK_OK\n@@pipeline REVIEW_RC 1\n@@pipeline DONE\n' > $PR/.autopilot/pipeline/Q-5-1.check
+echo "- [fk-d] major q5.txt:1 wrong" > $O/Q-5-findings-1.md; echo noop > $PLD/impl.mode; TICK; TICK
+check "fix round that changes nothing (tree already dirty) -> again one tier up" "$(ST Q-5) $(tail -1 $PLD/rm.log | grep -c 'Q-5-impl-2.md .*--role escalate')" "2 implement 1"
+TICK; rm $PLD/impl.mode
+check "fix round empty twice -> triage" "$(ST Q-5)" "2 triage"
+$H/bin/state del inflight.Q-5 >/dev/null; rm -f $W5Q/q5.txt
+$H/bin/state set checks_fast '["test ! -e FASTFAIL"]' >/dev/null; $H/bin/state set checks '["test ! -e FULLFAIL"]' >/dev/null
+W3Q=$SCR/prepo-wt/Q-3; $PL start Q-3 >/dev/null 2>&1
+check "two-level checks: the implementer brief names the fast checks and leaves the full suite to the pipeline" "$(grep -c 'test ! -e FASTFAIL (fast checks; the pipeline runs the full suite `test ! -e FULLFAIL`' $PR/.autopilot/briefs/Q-3-impl-1.md)" "1"
+touch $W3Q/FULLFAIL; echo 0 > $PLD/review.rcs; TICK; TICK
+check "fast checks then review; approve -> stage final (full checks), not approved yet" "$(ST Q-3) $(grep -c '^@@pipeline CHECK test ! -e FASTFAIL' $PR/.autopilot/pipeline/Q-3-1.check) $(grep -c Q-3 $PR/.autopilot/pipeline/approved.txt)" "1 final 1 0"
+TICK; TICK
+check "full checks fail -> fix round 2 with their output" "$(ST Q-3) $(grep -c 'checks failed (rc=1 .test ! -e FULLFAIL.)' $O/Q-3-fix-2.md) $(grep -c 'run the failing' $O/Q-3-fix-2.md)" "2 implement 1 1"
+rm $W3Q/FULLFAIL; echo 0 > $PLD/review.rcs; TICK; TICK; TICK; TICK
+check "full checks pass -> approved" "$(ST Q-3) $(grep -c '^Q-3 r2$' $PR/.autopilot/pipeline/approved.txt) $(grep -c '^@@pipeline CHECK test ! -e FULLFAIL' $PR/.autopilot/pipeline/Q-3-2.final)" "2 approved 1 1"
+$H/bin/state del checks_fast >/dev/null
+W4Q=$SCR/prepo-wt/Q-4; echo q4 > $W4Q/q4.txt
+$H/bin/state set inflight.Q-4 "{\"wt\": \"$W4Q\", \"round\": 4, \"stage\": \"review\", \"stage_at\": \"2020-01-01T00:00:00+00:00\", \"nfind\": 3}" >/dev/null
+printf '@@pipeline START x\n@@pipeline CHECK_OK\n@@pipeline REVIEW_RC 1\n@@pipeline DONE\n' > $PR/.autopilot/pipeline/Q-4-4.check
+echo "- [fk-d] major a.txt:1 one left" > $O/Q-4-findings-4.md; TICK
+check "past max_rounds, fewer findings than last review -> round 5 by itself (converging)" "$(ST Q-4) $(grep -c 'Q-4 r4: 1 findings (was 3): converging' $PR/.autopilot/pipeline/pipeline.log)" "5 implement 1"
+$H/bin/state set inflight.Q-4.round 5 >/dev/null; $H/bin/state set inflight.Q-4.stage '"review"' >/dev/null; $H/bin/state set inflight.Q-4.nfind 1 >/dev/null
+printf '@@pipeline START x\n@@pipeline CHECK_OK\n@@pipeline REVIEW_RC 1\n@@pipeline DONE\n' > $PR/.autopilot/pipeline/Q-4-5.check
+printf -- '- [fk-d] major a.txt:1 one\n- [fk-d] major a.txt:2 two\n' > $O/Q-4-findings-5.md; TICK
+check "not converging (more findings) -> triage" "$(ST Q-4)" "5 triage"
+$H/bin/state set pipeline.auto_merge true >/dev/null
+N0=$(git rev-list --count HEAD); TICK
+check "auto_merge: an approved ticket is merged by the loop, logged in merged.txt" "$(ST Q-3) $(($(git rev-list --count HEAD) - N0)) $(git log -1 --format=%s) $(grep -c ' Q-3 r2 ' $PR/.autopilot/pipeline/merged.txt)" "gone 1 feat: title [Q-3] 1"
+for q in Q-6 Q-7 Q-8; do QT $q src/shared.ts; done; QT Q-9 src/Q-9.ts
+NIN=$($H/bin/state get inflight | python3 -c "import json,sys;print(len(json.load(sys.stdin)))")
+$H/bin/state set queue '["Q-6", "Q-7", "Q-8", "Q-9", "Q-5"]' >/dev/null; $H/bin/state set blockers '{"Q-8": ["Q-6"]}' >/dev/null
+$H/bin/state set pipeline.setup '"touch SETUP_RAN"' >/dev/null; $H/bin/state set pipeline.target_inflight $((NIN + 2)) >/dev/null
+$H/bin/state set pipeline.auto_start true >/dev/null; TICK
+check "auto_start: queue order, blocked and overlapping Touches skipped, setup ran, up to target_inflight" "$(ST Q-6) $(test -f $SCR/prepo-wt/Q-6/SETUP_RAN && echo setup) $(ST Q-7) $(ST Q-8) $(ST Q-9) $(ST Q-5)" "1 implement setup gone gone 1 implement gone"
+$H/bin/state set pipeline.auto_start false >/dev/null; $H/bin/state set pipeline.auto_merge false >/dev/null
 unset AUTOPILOT_REPO PIPELINE_SYNC PIPELINE_RUN_MODEL PIPELINE_REVIEW
 check "opencode adapter disables the websearch tool (headless runs cannot answer its prompt)" "$(python3 -c "import json;e=json.load(open('$H/harnesses/opencode.json'))['run']['env'];print(json.loads(e['OPENCODE_CONFIG_CONTENT'])['tools']['websearch'])")" "False"
 RW=$SCR/reap-wt; mkdir -p $RW/web; (cd $RW/web && exec sleep 300) & RSP=$!; sleep 0.5

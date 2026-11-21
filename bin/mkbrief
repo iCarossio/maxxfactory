@@ -5,7 +5,8 @@ Fills prompts/implement.md, prompts/review.md, prompts/plan-review.md (adversari
 prompts/diagnose.md (read-only root-cause diagnosis of one scope, `SCOPE=` env text) for one ticket.
 - Repo and state: the nearest `.autopilot/state.json` above the current directory (or $AUTOPILOT_REPO).
 - Working directory of the ticket: $WT (a worktree) or the repo itself.
-- ticket.md: first line `# Title`, then the body. A line `CHECKS: <cmd>` sets the checks (else state.json `checks`).
+- ticket.md: first line `# Title`, then the body. A line `CHECKS: <cmd>` sets the checks (else state.json `checks`);
+  `CHECKS_FAST: <cmd>` (else state.json `checks_fast`) is what implementers run each round (two-level checks).
   An `**Acceptance**` section is extracted as the acceptance criteria.
 - Review diff base: HEAD while the ticket is uncommitted (implementers never commit). When the worktree's branch is ahead
   of the project branch (a ticket committed by `finish`, then recovered with `rebase-wt`), the base is the merge-base with
@@ -38,6 +39,11 @@ title = T.splitlines()[0].lstrip('# ').strip()
 body = '\n'.join(T.splitlines()[1:])
 m = re.search(r'^CHECKS:(.*)$', T, re.M)
 checks = (m.group(1).strip() if m else '') or ' && '.join(S.get('checks', [])) or 'the verification steps in the acceptance criteria'
+# Two-level checks: implementers run the fast checks; the pipeline runs the full ones once the review approves.
+mf = re.search(r'^CHECKS_FAST:(.*)$', T, re.M)
+fast = (mf.group(1).strip() if mf else '') or ' && '.join(S.get('checks_fast') or [])
+if fast:
+    checks = '%s (fast checks; the pipeline runs the full suite `%s` after the review approves)' % (fast, checks)
 acc = re.search(r'\*\*Acceptance\*\*(.*)', body, re.S)
 acc = acc.group(1).strip() if acc else 'see ticket'
 tpl = template({'impl': 'implement.md', 'review': 'review.md', 'plan': 'plan-review.md', 'diag': 'diagnose.md'}[kind])
@@ -48,7 +54,7 @@ if lib.is_git(R):
     if ahead.isdigit() and int(ahead) > 0:
         base = lib.git(R, 'merge-base', S['branch'], 'HEAD').stdout.strip() or 'HEAD'
 rep = {'ISSUE_ID': iss, 'ISSUE_TITLE': title, 'CWD': R, 'BRANCH': S['branch'], 'CONTEXT_FILES': ctx,
-       'ISSUE_BODY': body, 'ACCEPTANCE': acc, 'FINDINGS': findings, 'CHECKS': checks, 'BASE': base, 'TICKET_PATH': os.path.abspath(tf), 'SCOPE': os.environ.get('SCOPE', '(whole ticket)')}
+       'ISSUE_BODY': body, 'ACCEPTANCE': acc, 'FINDINGS': findings, 'CHECKS': checks, 'BASE': base, 'ROUND': str(n), 'TICKET_PATH': os.path.abspath(tf), 'SCOPE': os.environ.get('SCOPE', '(whole ticket)')}
 for k, v in rep.items():
     tpl = tpl.replace('{{' + k + '}}', v)
 os.makedirs(os.path.join(M, '.autopilot', 'briefs'), exist_ok=True)
