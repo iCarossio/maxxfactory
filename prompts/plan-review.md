@@ -18,6 +18,7 @@ You review the implementation plan (the ticket file) BEFORE any code is written.
 5. Shortcut traps: places where the obvious cheap route is a shortcut (copying expected outputs, per-case lists, test-only code); the plan should forbid them explicitly.
 5b. Design bar: a ticket that changes something a user sees must name its references, look criteria on realistic data and screenshot acceptance; functional criteria alone are an unmet planning criterion.
 6. Scope and size: work outside the Linear ticket, or a plan too big for one round (> ~400 changed lines) that should be split.
+7. Fan-out: when three or more tickets apply the same pattern, is there a contract ticket that lands every shared type, prop and signature first, and one Tier 1 reference ticket the others are blocked by and copy? Does any ticket of the fan-out need to edit a shared file (a type, a component, a ledger doc such as an inventory or registry) that its siblings also edit? Each of these is a `major` finding.
 
 Severity: `blocker`/`major` only when the gap would make a literal implementation fail, take a wrong architecture, or pass checks without meeting the goal. Wording and style are `minor`. Use `file` = the ticket file or the repo file the finding is about.
 
