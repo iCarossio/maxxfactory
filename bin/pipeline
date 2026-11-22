@@ -13,8 +13,13 @@ ticket's worktree, and bin/review.
   pipeline fix <ISSUE> <findings.md>             # the coordinator's own next round (after triage, or instead of a stuck step)
   pipeline retry <ISSUE>                         # a stuck ticket: redo the step that got stuck
   pipeline merge <ISSUE> "<subject>" "<body>"    # merge an approved ticket: rebase, squash, bin/finish (exit 3: conflict)
-  pipeline status                                # one line per in-flight ticket, then the ETA lines of bin/eta
-  pipeline wait-approval [--interval S]          # block until approved.txt or attention.txt has a line, print them
+  pipeline status                                # the RUN verdict, one line per in-flight ticket, then the ETA lines of bin/eta
+  pipeline wait-approval [--interval S] [--tick S] [--stuck-after S]
+                                                  # the coordinator's one wake-up job. Returns with: the lines of
+                                                  # approved.txt / attention.txt; or the `RUN:` line once the run is
+                                                  # DONE or WAITING ON OWNER, or has been STUCK or STOPPED for --stuck-after
+                                                  # (300 s); or `TICK` + the `RUN:` line after --tick (600 s; 0: never).
+                                                  # It never waits for nothing.
 
 Per ticket, state.json `inflight.<ISSUE>`: `wt`, `round`, `stage`, `stage_at`, optional `pool` (review pool for
 bin/review), and the pipeline's own bookkeeping (`tries`, `merges`, `why`, `stuck_from`). Stages the loop drives:
@@ -819,13 +824,14 @@ def auto_start(st, c):
     if room <= 0:
         return
     done, blocked = set(st.get('done', [])), set(st.get('blocked') or [])
+    owner = lib.owner_waits(st)  # a ticket that waits on the owner never starts by itself
     busy = set()
     for t in inf:
         busy |= touches_of(t)
     for t in st.get('queue', []):
         if room <= 0:
             break
-        if t in inf or t in done or t in blocked or not os.path.exists(ticket_file(t)):
+        if t in inf or t in done or t in blocked or t in owner or not os.path.exists(ticket_file(t)):
             continue
         if any(b not in done for b in (st.get('blockers') or {}).get(t, [])):
             continue
@@ -1110,6 +1116,14 @@ def detail(t, v):
 def cmd_status():
     st = lib.load_state(M)
     inf = st.get('inflight', {})
+    p = subprocess.run([tool('eta')], cwd=M, env=env(), capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    eta = p.stdout.splitlines()
+    # The verdict first, on its own: RUNNING, DONE, STUCK or WAITING ON OWNER is the one thing the owner must never
+    # have to work out from the bars.
+    verdict = [x for x in eta if x.startswith('RUN: ')] or [lib.run_state(M, st)['line']]
+    eta = [x for x in eta if not x.startswith('RUN: ')]
+    print(verdict[0])
+    print()
     if not inf:
         print('no ticket in flight')
     for t, v in sorted(inf.items(), key=lambda x: (milestone_of(st, x[0]), x[0])):
@@ -1121,22 +1135,45 @@ def cmd_status():
         if v.get('stage') in ('triage', 'stuck'):
             line += '  ' + str(v.get('why', ''))[:120]
         print(line)
-    p = subprocess.run([tool('eta')], cwd=M, env=env(), capture_output=True, text=True, stdin=subprocess.DEVNULL)
     # The REPLAN lines are printed too: this is the view the coordinator shows the owner at every update, and
     # cutting them here (as before 2026-11-15) meant the re-plan triggers never reached the coordinator.
-    eta = p.stdout.splitlines()
     if eta:
         print()
         print('\n'.join(eta))
 
 
 def cmd_wait(a):
-    interval = float(a[a.index('--interval') + 1]) if '--interval' in a else 15
+    def opt(flag, default):
+        return float(a[a.index(flag) + 1]) if flag in a else default
+    interval, tick_s, stuck_after = opt('--interval', 15), opt('--tick', 600), opt('--stuck-after', 300)
     ap, at = os.path.join(PD, 'approved.txt'), os.path.join(PD, 'attention.txt')
+    t0, stuck_since, settled = time.time(), None, 0
     while True:
         ok, att = lines(ap), lines(at)
         if ok or att:
             print('\n'.join(ok + ['ATTENTION: ' + x for x in att]))
+            return
+        # A wait that can no longer be answered is the failure of 2026-11-22: the coordinator slept on a pipeline with
+        # nothing left to approve. So the wait also ends when the run is over, waits on the owner, or stopped moving.
+        rs = lib.run_state(M)
+        now = time.time()
+        if rs['state'] in ('DONE', 'WAITING ON OWNER'):
+            settled += 1
+            if settled >= 2:  # two readings: a merge in progress is not the end of the run
+                print(rs['line'])
+                return
+        else:
+            settled = 0
+        if rs['state'] in ('STUCK', 'STOPPED'):
+            stuck_since = stuck_since or now
+            if now - stuck_since >= stuck_after:
+                print(rs['line'])
+                return
+        else:
+            stuck_since = None
+        if tick_s and now - t0 >= tick_s:
+            print('TICK')
+            print(rs['line'])
             return
         time.sleep(interval)
 

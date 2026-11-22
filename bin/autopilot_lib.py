@@ -1303,3 +1303,169 @@ def gc_worktrees(repo, dry=False, now=None):
                 git(repo, 'branch', '-q', '-D', br)
             out.append(('branch', br, ('ticket done' if t in done else 'no commit of its own') + (' (dry run)' if dry else '')))
     return out
+
+
+# ---------- run state: is the run moving, done, stuck, or waiting on the owner? ----------
+# 2026-11-22: a run sat for hours with one ticket held by the coordinator (stage `hold`, outside the clock), two
+# tickets that only the owner could unblock, `wait-approval` blocked on a pipeline with nothing to approve, and an
+# ETA that moved forward at every reading. Nothing said "stuck" or "waiting on you". The verdict is computed here,
+# from facts (state.json, the clock's lock, live jobs and processes), never from what the coordinator believes.
+
+PIPELINE_DRIVEN = ('starting', 'implement', 'merge', 'rebase', 'review', 'final')
+RUN_STATES = ('RUNNING', 'DONE', 'STUCK', 'WAITING ON OWNER', 'STOPPED')
+
+
+def clock_alive(repo):
+    """True while a `pipeline run` holds this project's lock."""
+    p = os.path.join(repo, '.autopilot', 'pipeline', 'run.lock')
+    if not os.path.exists(p):
+        return False
+    try:
+        with open(p, 'a+') as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            fcntl.flock(f, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    return False
+
+
+def live_bg_jobs(repo):
+    """Names of the bgrun jobs of this project that still run (the clock itself excluded)."""
+    d, out = os.path.join(repo, '.autopilot', 'jobs'), []
+    for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        try:
+            j = read_json(os.path.join(d, name))
+            if j.get('status') != 'running' or j.get('name') == 'pipeline':
+                continue
+            os.kill(int(j['pid']), 0)
+            out.append(j['name'])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return out
+
+
+def open_tickets(st):
+    """(in flight, queued) ticket ids in scope: ideas never count, a ticket is listed once."""
+    ideas = st.get('ideas') or {}
+    idea_set = set(ideas.get('issues') or [])
+    inflight = {t: v for t, v in (st.get('inflight') or {}).items() if t not in idea_set}
+    done = set(st.get('done') or [])
+    raw = list(st.get('queue') or [])
+    for m in st.get('milestones') or []:
+        if m.get('linear_id') and m.get('linear_id') == ideas.get('linear_milestone_id'):
+            continue
+        raw += m.get('issues', [])
+    queue = [t for t in dict.fromkeys(raw) if t not in idea_set and t not in inflight and t not in done]
+    return inflight, queue
+
+
+def owner_waits(st):
+    """{ticket: what the owner must do} for every open ticket that cannot move without the owner: listed in
+    state.json `owner_wait` ({ticket: reason}) or `blocked`, or queued behind such a ticket."""
+    inflight, queue = open_tickets(st)
+    open_set = set(inflight) | set(queue)
+    direct = {t: str(r) for t, r in (st.get('owner_wait') or {}).items() if t in open_set}
+    for t in st.get('blocked') or []:
+        if t in open_set:
+            direct.setdefault(t, 'blocked')
+    out, blockers = dict(direct), st.get('blockers') or {}
+    changed = True
+    while changed:
+        changed = False
+        for t in queue:
+            if t in out:
+                continue
+            for b in blockers.get(t, []):
+                if b in out:
+                    out[t] = out[b]
+                    changed = True
+                    break
+    return out
+
+
+def run_state(repo, st=None, procs=None):
+    """The verdict on a run: {'state': one of RUN_STATES, 'why': one line, 'live', 'owner', 'stuck', 'line'}.
+    RUNNING: at least one ticket is really moving (driven by a live clock, or a job or model run exists for a ticket
+    the coordinator drives by hand). DONE: nothing left in scope. WAITING ON OWNER: every ticket left needs the owner.
+    STUCK: work is left, nothing moves, and it is not the owner's turn. STOPPED: no clock and nothing in flight (a
+    project planned and not started, or a run whose session ended between tickets): the ETA is the plan's."""
+    st = load_state(repo) if st is None else st
+    inflight, queue = open_tickets(st)
+    done = set(st.get('done') or [])
+    owner = owner_waits(st)
+    pcfg = st.get('pipeline') or {}
+    clock = clock_alive(repo)
+    jobs = live_bg_jobs(repo)
+    if procs is None:
+        procs = subprocess.run(['ps', '-ax', '-o', 'command='], capture_output=True, text=True).stdout.splitlines()
+    live, stuck = [], []
+    for t, v in inflight.items():
+        if t in owner:
+            continue
+        stage = v.get('stage', '?') if isinstance(v, dict) else '?'
+        if stage in ('triage', 'stuck'):
+            stuck.append('%s %s: waits for the coordinator' % (t, stage))
+        elif stage == 'approved' and not pcfg.get('auto_merge'):
+            stuck.append('%s approved: waits for the coordinator to merge it' % t)
+        elif stage in PIPELINE_DRIVEN or stage == 'approved':
+            wt = (v.get('wt') if isinstance(v, dict) else None) or os.path.join(worktrees_dir(repo, st), t)
+            if not clock:
+                stuck.append('%s %s: the pipeline clock is not running' % (t, stage))
+            elif stage != 'starting' and not os.path.isdir(wt):
+                stuck.append('%s %s: its worktree is missing (%s)' % (t, stage, wt))
+            else:
+                live.append('%s %s' % (t, stage))
+        else:  # hold, plan, ...: the coordinator drives it by hand, so only a job or a model run proves it moves
+            pat = re.compile(r'(?<![A-Za-z0-9-])%s(?![A-Za-z0-9])' % re.escape(t))
+            own = any(pat.search(c) and any(os.path.basename(x) in ('run-model', 'review') for x in c.split()[:3])
+                      for c in procs)
+            if jobs or own:
+                live.append('%s %s (%s)' % (t, stage, 'jobs: ' + ', '.join(jobs[:4]) if jobs else 'model run'))
+            else:
+                stuck.append('%s %s: driven by hand, and no job or model run exists for it' % (t, stage))
+    blockers = st.get('blockers') or {}
+    ready = [t for t in queue if t not in owner and all(b in done for b in blockers.get(t, []))]
+    for t in ready:
+        tf = os.path.join(repo, '.autopilot', 'tickets', t + '.md')
+        if clock and pcfg.get('auto_start') and os.path.exists(tf):
+            live.append('%s starts by itself' % t)
+    stopped = bool(ready) and not clock and not live and not [t for t in inflight if t not in owner]
+    if ready and not live:
+        stuck.append('%d ticket%s ready and not started (%s)' % (len(ready), '' if len(ready) == 1 else 's',
+                                                                 ', '.join(ready[:5]) + (', ...' if len(ready) > 5 else '')))
+    by_reason = {}
+    for t, r in owner.items():
+        by_reason.setdefault(r, []).append(t)
+    owner_txt = '; '.join('%s (%s)' % (r, ', '.join(ts)) for r, ts in by_reason.items())
+    n_open = len(inflight) + len(queue)
+    if not n_open:
+        state = 'DONE'
+        why = '%d/%d tickets done, nothing left to run' % (len(done), len(done))
+        if st.get('proposed_milestones'):
+            why += '; %d proposed milestone(s) await your approval' % len(st['proposed_milestones'])
+    elif live:
+        state = 'RUNNING'
+        why = ', '.join(live[:6]) + (', ...' if len(live) > 6 else '')
+        if stuck:
+            why += ' | needs the coordinator: ' + '; '.join(stuck[:3])
+        if owner:
+            why += ' | waiting on owner: ' + owner_txt
+    elif len(owner) == n_open:
+        state = 'WAITING ON OWNER'
+        why = owner_txt + '. Nothing else can run'
+    elif stopped:
+        state = 'STOPPED'
+        why = '%d ticket%s ready, the pipeline is not running: /maxxfactory-run starts it, /maxxfactory-continue resumes it' % (
+            len(ready), '' if len(ready) == 1 else 's')
+        if owner:
+            why += ' | waiting on owner: ' + owner_txt
+    else:
+        state = 'STUCK'
+        why = '; '.join(stuck[:4]) if stuck else 'tickets are left but none is in flight or ready: check `blockers`'
+        if owner:
+            why += ' | waiting on owner: ' + owner_txt
+    return {'state': state, 'why': why, 'live': live, 'owner': owner, 'stuck': stuck, 'ready': ready,
+            'line': 'RUN: %s | %s' % (state, why)}

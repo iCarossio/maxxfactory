@@ -108,7 +108,7 @@ The skills are the interface; they call the runtime in `bin/`, which you can als
 | `install.sh [--agents] [--import <models.json>]` | links the skills and creates the user config |
 | `bin/harness` | registry of CLIs, accounts and the model roster: `init`, `discover`, `list`, `check`, `pools`, `adapters`, `whoami`, `add-model`, `add-account`, `subscription`, `set`, `set-home`, `remove`, `new`, `migrate` |
 | `bin/run-model` | `run` runs one model for one role and prints one JSON line; also `pool`, `whoami`, `smoke`, `discover`, `health`, `reset`, `wait`, `usage`, `status`, `alerts`, `vendor` |
-| `bin/pipeline` | the ticket clock (implement, rebase, checks, review, fix rounds): `run`, `start`, `fix`, `retry`, `merge`, `status`, `wait-approval` |
+| `bin/pipeline` | the ticket clock (implement, rebase, checks, review, fix rounds): `run`, `start`, `fix`, `retry`, `merge`, `status` (first line: the run verdict, `RUN: RUNNING`, `DONE`, `STUCK`, `WAITING ON OWNER` or `STOPPED`), `wait-approval` (the coordinator's wake-up job: approvals, a change of verdict, a tick every 10 minutes) |
 | `bin/mkbrief` | fills the brief of an implementer, reviewer, plan reviewer or diagnosis from `prompts/` |
 | `bin/review` | sends one round to one or several reviewers and prints compact verdicts |
 | `bin/premortem` | pre-mortem of a plan by flagship models of other vendors |

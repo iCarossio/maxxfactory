@@ -252,10 +252,20 @@ def bars(e):
     rows = e['milestones'] or []
     w = max([len(r['name']) for r in rows] + [7])
     lines = [f"{r['name']:<{w}}  [{bar(r['pct'])}] {r['pct']:>4.0%}  {r['done']}/{r['total']} done  |  "
-             + (f"ETA {when(r['end'])} (±{r['spread_min']} min)" if r['end'] else 'done') for r in rows]
+             + row_when(r) for r in rows]
     lines.append(f"{'Overall':<{w}}  [{bar(e['pct'])}] {e['pct']:>4.0%}  {e['done']} done, {e['inflight']} in flight, "
-                 f"{e['todo']} to do  |  ETA {when(e['end'])} (±{e['spread_min']} min)")
+                 f"{e['todo']} to do  |  " + (e.get('when') or f"ETA {when(e['end'])} (±{e['spread_min']} min)"))
+    if (e.get('run') or {}).get('line'):
+        lines.insert(0, e['run']['line'])  # the verdict first: done, stuck and waiting-on-owner never hide behind a bar
     return lines
+
+
+def row_when(r):
+    """The date of a milestone row with the full date, or why it has none (done, stuck, waiting on owner)."""
+    if r['end']:
+        extra = f"  (+{r['owner_wait']} waiting on owner)" if r.get('owner_wait') else ''
+        return f"ETA {when(r['end'])} (±{r['spread_min']} min)" + extra
+    return r.get('when') or 'done'
 
 
 # ---------- spec validation and rendering ----------
@@ -458,9 +468,10 @@ def cmd_list(a):
     if a.json: print(json.dumps(e['milestones'], indent=1)); return
     for r in e['milestones'] or []:
         print(f"{r['id']:<16} {r['name']:<32} {r['done']}/{r['total']} done  "
-              + (f"ETA {when(r['end'])} (±{r['spread_min']} min)" if r['end'] else 'done'))
+              + row_when(r))
     if not e['milestones']:
-        print(f"(no milestones: one implicit scope) {e['done']} done, {e['todo']} to do  ETA {when(e['end'])}")
+        print(f"(no milestones: one implicit scope) {e['done']} done, {e['todo']} to do  "
+              + (e.get('when') or f"ETA {when(e['end'])}"))
 
 
 def drop_review_worktree(repo, wt):

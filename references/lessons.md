@@ -189,3 +189,15 @@ What the runtime does now: `pipeline run` runs the worktree garbage collection e
 - An empty round after an environment failure is correct, not a stall: reset `round`, clear `tree`/`empty_retry`, and send the ticket back to checks.
 - Two full suites at once on 16 cores (load 37-41) fail browser and container tests that pass alone. Keep `max_full_jobs` at 1 on one machine, and rerun the failing tests alone before sending an approved ticket back.
 - Test runs rewrite tracked screenshots of other tickets and add `.next-dev-smoke` entries to `web/tsconfig.json`: restore them before a merge.
+
+## QA run killed by the coordinator's own PLAN.md edits (2026-11-21, escape.tech)
+Symptom: a 4-hour full QA ended with 9 suites "report missing"; the log shows "Dirty site refused". Cause: the QA read the site from the coordinator checkout, and `bin/decision add` rewrote PLAN.md there mid-run; the QA refuses a dirty site. Rule: long QA runs read a detached worktree frozen at a commit (`git worktree add --detach <wt>/qa HEAD`), never the checkout where the coordinator writes PLAN.md, decisions or notes.
+
+## A run that looked alive and was waiting for nothing (2026-11-22, escape.tech)
+Symptom: the owner asks "are we done?" and gets a long status with a table; hours later nothing has moved and the ETA is still two hours away. Three causes, each fixed in the runtime:
+- The coordinator resumed through `/maxxfactory-continue`, which told it to read the run rulebook as a file. A compaction dropped it: no bars, no tick, no heartbeat from then on. Rule: the rulebook is loaded by invoking the `maxxfactory-run` skill, and invoked again after every compaction.
+- The last ticket was held by the coordinator (stage `hold`), so the pipeline had nothing to approve and `wait-approval` could never return; the two tickets behind it needed the owner (a DNS switch), which no file recorded. Rule: `owner_wait` in state.json names every ticket that waits on the owner; `wait-approval` ends on DONE, WAITING ON OWNER, STUCK, and every 10 minutes.
+- The held ticket had no `est`, so its ETA was "now + 141 min" at every reading. Rule: `bin/eta` prints the `RUN:` verdict first, shows a date only while the run moves, marks a date that rests on an unestimated held ticket as a guess, and leaves owner work out of it.
+
+## Parity suites read a dist/ the site tests were rebuilding (2026-11-22, escape.tech)
+Symptom: a final QA run had landing visual captures fail with `net::ERR_HTTP_RESPONSE_CODE_FAILURE` on pages that exist; dist/*.html timestamps were newer than the build step. Cause: the site's `npm test` ran in the background in the same worktree and rebuilt dist/ while parity:visual served it. Also: running the parity suites by hand without `PARITY_BASE=http://localhost:$SERVE_PORT` made them hit whatever listened on the default port 4321 (the test suite's server). Rule: run site tests in their own detached worktree, never beside parity suites on the same dist; always export PARITY_BASE with SERVE_PORT, as the QA runner does.

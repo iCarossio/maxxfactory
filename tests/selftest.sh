@@ -532,7 +532,8 @@ cat > $ER/.autopilot/state.json <<EOF
  "stages": [["A"], ["B"], ["C"]], "parallel_target": 3}
 EOF
 EO=$(ETA_LOAD=0 AUTOPILOT_REPO=$ER $H/bin/eta)
-check "eta: timezone on the ETA line" "$(echo "$EO" | head -1 | grep -cE 'ETA [A-Z][a-z]{2} [0-9]{2}:[0-9]{2} [A-Z+0-9-]+ ')" "1"
+check "eta: timezone on the ETA line" "$(echo "$EO" | grep -v '^RUN: ' | head -1 | grep -cE 'ETA [A-Z][a-z]{2} [0-9]{2}:[0-9]{2} [A-Z+0-9-]+ ')" "1"
+check "eta: the RUN verdict is the first line; a planned run with no clock is STOPPED and keeps its ETA" "$(echo "$EO" | head -1 | cut -d'|' -f1)" "RUN: STOPPED "
 check "eta: serial tail flagged" "$(echo "$EO" | grep -c 'REPLAN: 3 single-item stages in a row (A -> B -> C)')" "1"
 check "eta: idle lanes flagged" "$(echo "$EO" | grep -c 'REPLAN: 0 in flight, target 3, 3 queued')" "1"
 check "eta: overload suppresses idle lanes" "$(ETA_LOAD=999 AUTOPILOT_REPO=$ER $H/bin/eta | grep -cE 'REPLAN: (machine load 999|0 in flight)' ; ETA_LOAD=999 AUTOPILOT_REPO=$ER $H/bin/eta | grep -c 'REPLAN: machine load')" "1
@@ -578,6 +579,32 @@ cat > $ER/.autopilot/mcp.json <<'EOF'
  ]}
 EOF
 echo '{"hasNextPage": true, "issues": []}' > $ER/.autopilot/mcp-partial.json
+# The RUN verdict (lib.run_state): done, stuck and waiting-on-owner are said in words, and only a run that moves has an ETA.
+RS=$SCR/run-state; mkdir -p $RS/.autopilot/jobs $RS/.autopilot/pipeline && (cd $RS && git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init)
+RB=$(git -C $RS branch --show-current)
+RST() { printf '{"branch": "%s", "per_unit_min": 60, %s}\n' "$RB" "$1" > $RS/.autopilot/state.json; }
+RE() { ETA_LOAD=0 AUTOPILOT_REPO=$RS $H/bin/eta "$@"; }
+RST '"queue": [], "inflight": {}, "done": ["A", "B"]'
+check "run state: everything done -> RUN: DONE, no ETA anywhere" "$(RE | head -1) $(RE | grep -c 'ETA ') $(RE | grep -c '2 done, 0 in flight, 0 to do  |  done')" "RUN: DONE | 2/2 tickets done, nothing left to run 0 1"
+RST '"queue": ["C", "D"], "inflight": {}, "done": ["A"], "owner_wait": {"C": "DNS switch"}, "blockers": {"D": ["C"]}'
+check "run state: only owner work left (and what is queued behind it) -> WAITING ON OWNER, no ETA" "$(RE | head -1) $(RE | grep -c 'ETA [A-Z]') $(RE | grep -c 'no ETA: waiting on owner  (+2 waiting on owner)')" "RUN: WAITING ON OWNER | DNS switch (C, D). Nothing else can run 0 1"
+check "run state: a ticket waiting on the owner is no idle lane" "$(RE | grep -c 'REPLAN: 0 in flight')" "0"
+RST '"queue": ["D"], "inflight": {"HX-1": {"stage": "hold"}}, "done": ["A"], "blockers": {"D": ["HX-1"]}'
+check "run state: a hand-driven ticket with no job and no model run -> STUCK, no ETA" "$(RE | head -1 | cut -c1-70) $(RE | grep -c 'ETA [A-Z~]') $(RE | grep -c 'no ETA: stuck')" "RUN: STUCK | HX-1 hold: driven by hand, and no job or model run exists 0 1"
+sleep 300 & SLP=$!
+printf '{"name": "qa", "pid": %s, "status": "running", "log": "/dev/null", "idle": 900}' $SLP > $RS/.autopilot/jobs/qa.json
+check "run state: the same ticket with a live bgrun job -> RUNNING; without est the ETA is marked a guess and a REPLAN line asks for one" "$(RE | head -1) $(RE | grep -c 'ETA ~.*guess: HX-1 not estimated') $(RE | grep -c 'REPLAN: HX-1 (hold) is driven by hand and has no estimate')" "RUN: RUNNING | HX-1 hold (jobs: qa) 1 1"
+RST '"queue": ["D", "O"], "inflight": {"HX-1": {"stage": "hold"}}, "done": ["A"], "blockers": {"D": ["HX-1"]}, "owner_wait": {"O": "sign-off"}, "est": {"HX-1": {"min": 30, "at": "'$(python3 -c "import datetime as d;print(d.datetime.now(d.timezone.utc).isoformat())")'"}}'
+check "run state: owner work is left out of the ETA and counted next to it" "$(RE | head -1) $(RE --json | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['minutes'], d['run']['state'], d['owner_wait'])") $(RE | grep -c 'ETA [A-Z].*(+1 waiting on owner)')" "RUN: RUNNING | HX-1 hold (jobs: qa) | waiting on owner: sign-off (O) 90 RUNNING {'O': 'sign-off'} 1"
+check "wait-approval: a tick ends the wait with TICK and the verdict" "$(cd $RS && $H/bin/pipeline wait-approval --interval 0.1 --tick 0.2 | tr '\n' ' ' | cut -c1-30)" "TICK RUN: RUNNING | HX-1 hold "
+kill $SLP 2>/dev/null; wait $SLP 2>/dev/null
+check "run state: the job died -> STUCK again (a job file that says running proves nothing)" "$(RE | head -1 | cut -c1-12)" "RUN: STUCK |"
+check "wait-approval: ends on STUCK instead of waiting for nothing" "$(cd $RS && $H/bin/pipeline wait-approval --interval 0.1 --stuck-after 0.2 --tick 0 | cut -c1-12)" "RUN: STUCK |"
+RST '"queue": [], "inflight": {"Y": {"stage": "review", "round": 2}}, "done": ["A"]'
+check "run state: a ticket in the pipeline while no clock runs -> STUCK" "$(RE | head -1)" "RUN: STUCK | Y review: the pipeline clock is not running"
+RST '"queue": [], "inflight": {}, "done": ["A", "B"]'
+check "wait-approval: ends on DONE" "$(cd $RS && $H/bin/pipeline wait-approval --interval 0.1 --tick 0)" "RUN: DONE | 2/2 tickets done, nothing left to run"
+check "pipeline status: the verdict is the first line" "$(cd $RS && $H/bin/pipeline status | head -1)" "RUN: DONE | 2/2 tickets done, nothing left to run"
 check "eta --from-mcp: refuses a partial page" "$(ETA_LOAD=0 AUTOPILOT_REPO=$ER $H/bin/eta --from-mcp $ER/.autopilot/mcp-partial.json >/dev/null 2>&1; echo $?)" "1"
 rm -f $ER/.autopilot/eta-history.jsonl
 check "eta --from-mcp: milestone order, done/inflight, canceled dropped, blocker depth" "$(ETA_LOAD=0 AUTOPILOT_REPO=$ER $H/bin/eta --from-mcp $ER/.autopilot/mcp.json --json | python3 -c "
@@ -646,7 +673,7 @@ check "recompute: stages match the hand-computed fixture" "$(J $MR/.autopilot/st
 check "recompute: size-weighted critical path" "$(J $MR/.autopilot/state.json "' '.join(d['critical_path'])")" "ENG-1 ENG-2 ENG-3 ENG-5"
 check "recompute: queue in stage order" "$(J $MR/.autopilot/state.json "' '.join(d['queue'])")" "ENG-1 ENG-4 ENG-2 ENG-3 ENG-5"
 EO=$(ETA)
-check "eta: 3 milestones -> 3 bars then the overall line" "$(echo "$EO" | grep -v '^REPLAN' | cut -c1-10 | tr '\n' '|')" "Foundation|Core      |Polish    |[░░░░░░░░░|"
+check "eta: 3 milestones -> 3 bars then the overall line" "$(echo "$EO" | grep -vE '^(REPLAN|RUN: )' | cut -c1-10 | tr '\n' '|')" "Foundation|Core      |Polish    |[░░░░░░░░░|"
 check "eta: no out-of-step signal once recomputed" "$(echo "$EO" | grep -c 'out of step')" "0"
 check "eta --json: per-milestone ETAs, cross-milestone dependency" "$(ETA --json | python3 -c "import json,sys;print(*[(m['id'], m['minutes'], m['total']) for m in json.load(sys.stdin)['milestones']])")" "('m1', 180, 2) ('m2', 360, 1) ('m3', 480, 2)"
 # Fake Linear: ENG-1..5 exist, with the same blocks relations as the state.

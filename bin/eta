@@ -32,6 +32,13 @@ Unacknowledged CRITICAL alerts (`bin/alert`, e.g. a vendor out of quota on every
 `CRITICAL:` line each, so no message that starts with the ETA can leave them out. Then one `SPOTLIGHT:` line per
 project tree Spotlight indexes (`bin/spotlight`).
 
+The run verdict (`lib.run_state`) prints next, before the bars: `RUN: RUNNING | DONE | STUCK | WAITING ON OWNER |
+STOPPED`, with the reason. A date is shown only while the run moves (RUNNING) or for a plan not started (STOPPED);
+otherwise the ETA reads `done`, `no ETA: stuck` or `no ETA: waiting on owner`. Tickets that wait on the owner
+(state.json `owner_wait` {ticket: what the owner must do}, `blocked`, and what is queued behind them) are left out of
+every date and counted as `(+N waiting on owner)`. A ticket in flight outside the clock (stage hold, plan, ...) with no
+`est` makes the date a guess, printed `ETA ~... (guess: <ticket> not estimated)` with a REPLAN line.
+
   eta [-v] [--json] [--from-mcp FILE]
                        --json: one JSON object (overall + per milestone + replan + alerts) instead of the text lines
                        --from-mcp: schedule from a Linear MCP snapshot instead of the stale queue in state.json.
@@ -275,6 +282,7 @@ def find_repo():
 
 M = find_repo()
 S = json.load(open(os.environ.get('ETA_STATE') or os.path.join(M, '.autopilot', 'state.json')))
+S_REAL = S  # the state on disk: the RUN verdict never reads a what-if schedule
 WITH_PROPOSALS = False  # a what-if reading: no slip signal, no history (the approved plan is the reference)
 # Proposed milestones (drafted with `bin/milestone add`, not yet approved) show as their own bars, tagged, on a what-if
 # schedule: the owner sees the effect of a milestone the moment it is drafted, not only after approval.
@@ -319,6 +327,14 @@ milestones = [dict(m, issues=[t for t in m.get('issues', []) if t not in idea_se
 raw_queue = [t for t in list(S.get('queue', [])) + [t for m in milestones for t in m.get('issues', [])] if t not in idea_set]
 queue = [t for i, t in enumerate(raw_queue) if t not in inflight and t not in done and t not in raw_queue[:i]]
 now = dt.datetime.now(dt.timezone.utc)
+# The verdict on the run (lib.run_state): printed first, and it decides whether an ETA means anything.
+WHAT_IF = bool(os.environ.get('ETA_STATE'))
+RUN = None if WHAT_IF else lib.run_state(M, S if WITH_MCP else S_REAL)
+# Tickets only the owner can unblock (state.json `owner_wait`, `blocked`, and what is queued behind them) are never
+# scheduled: a date for work that waits on a human is a lie, and it kept an ETA alive on a run nobody could finish.
+owner = lib.owner_waits(S)
+sched_inflight = [t for t in inflight if t not in owner]
+sched_queue = [t for t in queue if t not in owner]
 
 # Measured fallback: minutes of wall time per size unit on one lane, over the recent active window.
 log = subprocess.run(['git', '-C', M, 'log', '--format=%ct %s', S['branch']], capture_output=True, text=True).stdout
@@ -354,14 +370,14 @@ def minutes(t):
 
 stages, seen = [], set()
 for st in S.get('stages', []):
-    items = [t for t in st if t in inflight or t in queue]
+    items = [t for t in st if t in sched_inflight or t in sched_queue]
     if items:
         stages.append(items)
         seen.update(items)
-first = [t for t in inflight if t not in seen]
+first = [t for t in sched_inflight if t not in seen]
 if first:
     stages.insert(0, first)
-stages += [[t] for t in queue if t not in seen]
+stages += [[t] for t in sched_queue if t not in seen]
 total, plan = 0.0, []
 item_end = {}  # minutes from now at which each open ticket ends on the stage schedule
 for st in stages:
@@ -400,6 +416,8 @@ try:
 except (OSError, ValueError):
     pass
 # Slip: compare with the oldest reading taken 60-180 min ago.
+if RUN and RUN['state'] not in ('RUNNING', 'STOPPED'):
+    SKIP_HISTORY = True  # nothing moves: a reading would only record the clock
 past = [h for h in hist if 60 <= (now - dt.datetime.fromisoformat(h['at'])).total_seconds() / 60 <= 180]
 if past and not SKIP_HISTORY:
     ref = past[0]
@@ -445,10 +463,38 @@ if os.environ.get('ETA_LOAD'):  # tests
 if load > 2 * cores:
     replan.append(f"machine load {load:.0f} on {cores} cores (over 2x): do not add work; serialise the full "
                   "suites (implementers run focused tests only) before starting more tickets")
-elif queue and len(inflight) < target:
-    replan.append(f"{len(inflight)} in flight, target {target}, {len(queue)} queued: "
+elif sched_queue and len(inflight) < target:
+    replan.append(f"{len(inflight)} in flight, target {target}, {len(sched_queue)} queued: "
                   "start an independent ticket, or the independent part of one")
+# A ticket the coordinator drives by hand (a stage outside the clock: hold, plan, ...) has no rounds to count: without
+# `est` its duration is a constant, so the ETA moves forward at every reading and never arrives.
+guess = [t for t in sched_inflight if t not in est and isinstance(inflight[t], dict)
+         and inflight[t].get('stage') not in lib.PIPELINE_DRIVEN + ('approved', 'triage', 'stuck')]
+for t in guess:
+    replan.append(f"{t} ({inflight[t].get('stage', '?')}) is driven by hand and has no estimate, so the ETA is a guess "
+                  f"that never counts down: bin/state set est.{t} '{{\"min\": <minutes left>, \"at\": \"{now.isoformat(timespec='seconds')}\"}}'")
+for t in sched_inflight:
+    e = est.get(t)
+    if e:
+        over = (now - dt.datetime.fromisoformat(e['at'])).total_seconds() / 60 - float(e['min'])
+        if over > 30:
+            replan.append(f"{t} is {over:.0f} min past its estimate: find out why, then set `est` again")
 
+
+def no_eta():
+    """Why no date is shown, or None while the run really moves."""
+    if not RUN or RUN['state'] in ('RUNNING', 'STOPPED'):  # STOPPED: the plan's ETA, as if started now
+        return None
+    return {'DONE': 'done', 'STUCK': 'no ETA: stuck', 'WAITING ON OWNER': 'no ETA: waiting on owner'}[RUN['state']]
+
+
+def eta_text(end_at, minutes_left, n_owner=0, what_if=False):
+    s = None if what_if else no_eta()  # a proposed milestone keeps its what-if date
+    if not s:
+        s = f"ETA {'~' if guess else ''}{end_at:%a %H:%M %Z} (±{spread(minutes_left)} min{', guess: ' + ', '.join(guess) + ' not estimated' if guess else ''})"
+    if n_owner and s != 'done':
+        s += f"  (+{n_owner} waiting on owner)"
+    return s
 
 
 def progress(items):
@@ -484,12 +530,22 @@ if milestones:
         pct, d, f, q = progress(items)
         open_ = [t for t in items if t in item_end]
         m_end = max([item_end[t] for t in open_] or [0.0])
+        n_own = len([t for t in f + q if t in owner])
+        dated = bool(open_) and (mid in proposed_ids or not no_eta())
+        m_at = (now + dt.timedelta(minutes=m_end)).astimezone()
+        if not f and not q:
+            when = 'done'
+        elif open_:
+            when = eta_text(m_at, m_end, n_own, mid in proposed_ids)
+        else:
+            when = 'waiting on owner'
         rows.append({'id': mid, 'name': name, 'linear_id': lid, 'pct': round(pct, 4), 'total': len(items), 'done': len(d),
-                     'inflight': len(f), 'todo': len(q), 'status': 'open' if open_ else 'done',
+                     'inflight': len(f), 'todo': len(q), 'status': 'open' if f or q else 'done',
                      'minutes': round(m_end), 'spread_min': spread(m_end) if open_ else 0,
-                     'end': (now + dt.timedelta(minutes=m_end)).astimezone() if open_ else None,
+                     'end': m_at if dated else None, 'when': when, 'owner_wait': n_own,
                      'proposed': mid in proposed_ids})
 pct = progress(list(dict.fromkeys(list(done) + list(inflight) + queue)))[0]
+overall_when = eta_text(end, total_end, len([t for t in list(inflight) + queue if t in owner]))
 alerts = [] if os.environ.get('ETA_STATE') else lib.alerts(M)
 spotlight = [] if os.environ.get('ETA_STATE') else ['SPOTLIGHT: %s indexed (%d items): exclude it, see bin/spotlight' % x
                                                      for x in lib.spotlight_indexed(lib.spotlight_dirs(M))]
@@ -497,7 +553,8 @@ if '--json' in sys.argv:
     out = {'alerts': [lib.alert_line(a) for a in alerts] + spotlight, 'at': now.astimezone().isoformat(), 'end': end.isoformat(), 'minutes': round(total_end),
            'spread_min': spread(total_end), 'pct': round(pct, 4), 'done': len(done), 'inflight': len(inflight),
            'todo': len(queue), 'milestones': [dict(r, end=r['end'] and r['end'].isoformat()) for r in rows],
-           'replan': replan}
+           'replan': replan, 'when': overall_when, 'run': RUN and {k: RUN[k] for k in ('state', 'why', 'line')},
+           'owner_wait': owner}
     if WITH_MCP:
         out['mcp'] = MCP_NOTE
     print(json.dumps(out, indent=1))
@@ -508,15 +565,17 @@ for a in alerts:
     print(lib.alert_line(a))
 for x in spotlight:
     print(x)
+if RUN:
+    print(RUN['line'])
 if rows:
     w = max(len(r['name']) for r in rows)
     for r in rows:
-        when = f"ETA {r['end']:%a %H:%M %Z} (±{r['spread_min']} min)" if r['end'] else 'done'
+        when = r['when']
         if r.get('proposed'): when += '  (awaiting approval)'
         print(f"{r['name']:<{w}}  [{bar(r['pct'], 20)}] {r['pct']:.0%}  {r['done']}/{r['total']} done, "
               f"{r['inflight']} in flight  |  {when}")
 print(f"[{bar(pct)}] {pct:.0%}  {len(done)} done, {len(inflight)} in flight, {len(queue)} to do  |  "
-      f"ETA {end:%a %H:%M %Z} (±{spread(total_end)} min)")
+      f"{overall_when}")
 for r in replan:
     print(f"REPLAN: {r}")
 if '-v' in sys.argv:
