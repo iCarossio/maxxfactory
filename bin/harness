@@ -8,6 +8,9 @@
   harness list                                         # roster table: key, cli, model, account, vendor, tier, subscription, roles, health
   harness check                                        # the policy summary: role -> candidates (tier, account, subscription, health), then
                                                        # every missing piece with what to do; exit 1 when something blocks a role or an entry is refused
+  harness logins [--min-hours N] [--json]              # every account the run depends on (roster + coordinator): logged in or not, and when
+                                                       # the login expires (CLIs that say it); exit 1 when one is logged out or expires within
+                                                       # N hours (default 48). `check` includes it. AUTOPILOT_LOGIN_CHECK=off skips it.
   harness migrate [--dry-run]                          # convert a pre-2026-11-09 roster: level + vendor per entry, roles, subscription, no pools
   harness add-model <key> --cli <cli> --model <id> [--level 0-4] [--vendor V] [--subscription paid|paid?|free|reserved]
                     [--plan NAME] [--family PATTERN] [--cost high|mid|cheap|free] [--no-implement] [--env K=V ...] [--note TEXT] [--allow-fast]
@@ -386,11 +389,36 @@ def cmd_check(args):
     if r.get('pools'):
         print('roster in the pre-2026-11-09 format (hand-ordered pools): run `bin/harness migrate` first'); sys.exit(1)
     lines, probs = summary(r, ad)
+    probs += login_problems(ad)
     print('\n'.join(lines))
     print('\nMissing pieces:' if probs else '\nNothing missing.')
     for p_ in probs: print('  - ' + p_)
-    blocking = [p_ for p_ in probs if p_.startswith(('refused', 'role ', 'no Tier 1', 'CLI '))]
+    blocking = [p_ for p_ in probs if p_.startswith(('refused', 'role ', 'no Tier 1', 'CLI ', 'login '))]
     sys.exit(1 if blocking else 0)
+
+
+def login_problems(ad, min_hours=48):
+    out = []
+    for x in lib.logins(ad=ad, min_hours=min_hours):
+        if x['problem']:
+            out.append('login %s/%s%s: %s -> the owner runs `%s`' % (x['cli'], x['account'], ' (COORDINATOR: the run dies with it)' if x['coordinator'] else '',
+                                                                   x['problem'], lib.login_fix(x, ad)))
+    return out
+
+
+def cmd_logins(args):
+    ad = lib.adapters(); mh = float(opt(args, '--min-hours', 48))
+    rows = lib.logins(ad=ad, min_hours=mh)
+    if '--json' in args:
+        print(json.dumps(rows, indent=1))
+    else:
+        for x in rows:
+            state = {True: 'logged in', False: 'NOT LOGGED IN', None: 'unknown'}[x['logged_in']]
+            exp = 'expires %s (%s)' % (lib.parse_time(x['expires_at']).astimezone().strftime('%a %d %b %H:%M'),
+                                       '%dh' % x['hours_left'] if x['hours_left'] < 72 else '%dd' % (x['hours_left'] / 24)) if x['expires_at'] else 'expiry not reported by the CLI'
+            print('%-10s %-34s %-14s %-40s %s%s' % (x['cli'], x['account'].replace(os.path.expanduser('~'), '~')[:34], state, exp, 'COORDINATOR ' if x['coordinator'] else '',
+                                                     ('PROBLEM: %s -> `%s`' % (x['problem'], lib.login_fix(x, ad))) if x['problem'] else ''))
+    sys.exit(1 if any(x['problem'] for x in rows) else 0)
 
 
 def cmd_pools(args):
@@ -523,6 +551,6 @@ if __name__ == '__main__':
     a = sys.argv[1:]
     cmds = {'init': cmd_init, 'discover': cmd_discover, 'list': cmd_list, 'add-model': cmd_add_model, 'add-account': cmd_add_account,
             'set-home': cmd_set_home, 'remove': cmd_remove, 'new': cmd_new, 'pools': cmd_pools, 'adapters': cmd_adapters,
-            'check': cmd_check, 'migrate': cmd_migrate, 'subscription': cmd_subscription, 'whoami': cmd_whoami, 'set': cmd_set}
+            'check': cmd_check, 'logins': cmd_logins, 'migrate': cmd_migrate, 'subscription': cmd_subscription, 'whoami': cmd_whoami, 'set': cmd_set}
     if not a or a[0] not in cmds: print(__doc__); sys.exit(1)
     cmds[a[0]](a[1:])

@@ -49,7 +49,21 @@
     "extra usage"
   ],
   "account_login": {
-    "file": ".claude.json"
+    "file": ".claude.json",
+    "status": {
+      "argv": [
+        "auth",
+        "status"
+      ],
+      "json": {
+        "logged_in": "loggedIn",
+        "expires_at": "loginExpiresAt"
+      }
+    },
+    "login": [
+      "auth",
+      "login"
+    ]
   },
   "tokens": {
     "kind": "claude_projects",

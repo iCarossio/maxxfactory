@@ -4,7 +4,7 @@
 set -u
 H="$(cd "$(dirname "$0")/.." && pwd)"; export H
 SCR=$(mktemp -d -t autopilot-selftest); LPID=""; trap '[ -n "$LPID" ] && kill $LPID 2>/dev/null; rm -rf "$SCR"' EXIT
-export AUTOPILOT_CONFIG_DIR=$SCR/cfg3; mkdir -p "$SCR/fake"
+export AUTOPILOT_CONFIG_DIR=$SCR/cfg3; mkdir -p "$SCR/fake"; export AUTOPILOT_LOGIN_CHECK=off  # never probe the real CLIs here
 PASS=0; FAIL=0
 check() { if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "ok   $1"; else FAIL=$((FAIL+1)); echo "FAIL $1: got '$2' want '$3'"; fi; }
 cat > "$SCR/fake/fakecli" <<'EOF'
@@ -1280,4 +1280,53 @@ GP=$SCR/gc-proj; mkdir -p $GP/.autopilot && (cd $GP && git init -q -b main && gi
 echo '{"branch": "autopilot/proj", "done": [], "inflight": {}}' > $GP/.autopilot/state.json
 (cd $GP && $H/bin/gc >/dev/null 2>&1)
 check "gc never deletes the project branch, checked out or not" "$(git -C $GP branch --format='%(refname:short)' | tr '\n' ' ')" "autopilot/proj main "
+
+# ---- Logins: logged out, or a login that ends before the run does (2026-11-22: the coordinator's login ended at night)
+cat > "$SCR/fake/fakeauth" <<'EOF'
+#!/bin/bash
+case "${FA_HOME:-default}" in
+  */b) echo '{"loggedIn": true, "loginExpiresAt": "'$(python3 -c "import datetime as d;print((d.datetime.now(d.timezone.utc)+d.timedelta(hours=5,minutes=30)).isoformat())")'"}';;
+  */c) echo '{"loggedIn": false}';;
+  *) echo '{"loggedIn": true, "loginExpiresAt": "2099-01-01T00:00:00Z"}';;
+esac
+EOF
+chmod +x "$SCR/fake/fakeauth"; mkdir -p $SCR/fa/b $SCR/fa/c
+LOGINS=$(AUTOPILOT_LOGIN_CHECK=on AUTOPILOT_COORDINATOR=fa/default python3 - <<EOF
+import sys; sys.path.insert(0, "$H/bin"); import autopilot_lib as lib
+a = {'name': 'fa', 'binary': 'fakeauth', 'account_env': 'FA_HOME', 'account_default': '$SCR/fa/a',
+     'account_login': {'file': 'x', 'status': {'argv': ['st'], 'json': {'logged_in': 'loggedIn', 'expires_at': 'loginExpiresAt'}}, 'login': ['auth', 'login']}}
+reg = {'models': {'m': {'cli': 'fa', 'model': 'x'}, 'm-b': {'cli': 'fa', 'model': 'x', 'env': {'FA_HOME': '$SCR/fa/b'}},
+                  'm-c': {'cli': 'fa', 'model': 'x', 'env': {'FA_HOME': '$SCR/fa/c'}}, 'm-d': {'cli': 'fa', 'model': 'x', 'excluded': 'no', 'env': {'FA_HOME': '$SCR/fa/d'}}}}
+rows = lib.logins(reg, {'fa': a}, min_hours=48)
+print(len(rows), [r['problem'] for r in rows], [r['coordinator'] for r in rows], lib.login_fix(rows[1], {'fa': a}).replace('$SCR', 'S'))
+print([r['problem'] for r in lib.logins(reg, {'fa': a}, min_hours=2)])
+EOF
+)
+check "logins: ok, expiring soon and logged out are told apart; excluded accounts are skipped; the fix command names the account" "$(echo "$LOGINS" | head -1)" "3 ['login expires in 5h', 'not logged in', None] [False, False, True] FA_HOME=S/fa/c fakeauth auth login"
+check "logins: a login that outlasts --min-hours is no problem" "$(echo "$LOGINS" | tail -1)" "[None, 'not logged in', None]"
+
+# ---- permit: the rules a run needs are recorded, checked and applied; rules auto mode would drop are refused
+PP=$SCR/permit-proj; mkdir -p $PP/.autopilot $SCR/ccdir; echo '{}' > $PP/.autopilot/state.json
+(cd $PP && export CLAUDE_CONFIG_DIR=$SCR/ccdir
+ $H/bin/permit add 'Bash(gh workflow run publish.yml *)' --why "A1 publish" >/dev/null
+ $H/bin/permit add 'Bash(python *)' --why x >/dev/null 2>&1; echo "interp=$?" > $SCR/permit.out
+ $H/bin/permit add 'Bash(*)' --why x >/dev/null 2>&1; echo "star=$?" >> $SCR/permit.out
+ $H/bin/permit add 'Bash(rm -rf *)' --why x >/dev/null 2>&1; echo "rm=$?" >> $SCR/permit.out
+ $H/bin/permit add 'mcp__cloudflare__execute' >/dev/null 2>&1; echo "nowhy=$?" >> $SCR/permit.out
+ $H/bin/permit note "Deploying this repo to production is approved" >/dev/null
+ $H/bin/permit check >/dev/null; echo "before=$?" >> $SCR/permit.out
+ mkdir -p .github/workflows; printf 'on:\n  workflow_dispatch:\n' > .github/workflows/release.yml; echo 'on: push' > .github/workflows/ci.yml
+ echo '{"scripts":{"test":"x","build":"x"}}' > package.json; touch pnpm-lock.yaml
+ $H/bin/permit suggest --no-mcp | grep -c -e 'gh workflow run release.yml' -e 'pnpm run test ' -e 'gh workflow run ci.yml' -e 'gh workflow run publish.yml' | sed 's/^/suggest=/' >> $SCR/permit.out
+ $H/bin/permit apply --project >/dev/null; $H/bin/permit check | tail -1 >> $SCR/permit.out; $H/bin/permit check >/dev/null; echo "after=$?" >> $SCR/permit.out)
+check "permit: broad, rm and unexplained rules are refused; suggest reads the repo and skips recorded rules; check fails until apply" "$(tr '\n' ' ' < $SCR/permit.out)" "interp=1 star=1 rm=1 nowhy=1 before=1 suggest=2 permissions: nothing missing after=0 "
+check "permit apply --project: project rules in settings.local.json, the note in the user settings, nothing else touched" "$(python3 -c "
+import json;a=json.load(open('$PP/.claude/settings.local.json'))['permissions']['allow'];u=json.load(open('$SCR/ccdir/settings.json'))
+print('Bash(gh workflow run publish.yml *)' in a, any('bin/pipeline *' in r for r in a), u['autoMode']['allow'], 'permissions' in u)")" "True True ['\$defaults', 'Deploying this repo to production is approved'] False"
+PP2=$SCR/permit-proj2; mkdir -p $PP2/.autopilot $SCR/ccdir2; echo '{}' > $PP2/.autopilot/state.json
+(cd $PP2 && export CLAUDE_CONFIG_DIR=$SCR/ccdir2
+ $H/bin/permit add 'Bash(gh workflow run publish.yml *)' --why "A1 publish" >/dev/null; $H/bin/permit apply >/dev/null
+ $H/bin/permit check >/dev/null; echo "global=$? local=$(test -e .claude/settings.local.json && echo yes || echo no)" > $SCR/permit2.out)
+check "permit apply: by default the rules go to the user settings (global on the machine), not the checkout" "$(cat $SCR/permit2.out) $(python3 -c "import json;print('Bash(gh workflow run publish.yml *)' in json.load(open('$SCR/ccdir2/settings.json'))['permissions']['allow'])")" "global=0 local=no True"
+check "access scan: JSON with the three inventories" "$(cd $PP && $H/bin/access scan --json | python3 -c "import json,sys;print(sorted(json.load(sys.stdin)))")" "['cli', 'env', 'mcp']"
 echo "=== $PASS passed, $FAIL failed"

@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""access: what the agents can already do by themselves on this machine, before anything is asked of the owner.
+
+A plan that says "the owner clicks X in the dashboard" when a CLI, an MCP server or an API token could do it makes the
+run wait for a human (2026-11-22: a DNS switch and a production publish, both doable by tool). So planning starts
+from this inventory, and the owner is asked for ACCESS (a login, a token with the right scope, an MCP connection),
+not for clicks.
+
+  access scan [--json]     # ops CLIs installed and whether each is logged in, MCP servers of this harness and whether
+                           # each is connected, and the NAMES of the variables in ./.env (never a value)
+
+A CLI is "logged in" when its own read-only identity command exits 0. Extend the list for a project with
+<repo>/.autopilot/access.json: {"<name>": ["<binary>", "<arg>", ...]} (the identity command).
+"""
+import json, os, re, shutil, subprocess, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+CLIS = {  # name: read-only command that exits 0 only when logged in
+    'gh (GitHub)': ['gh', 'auth', 'status'], 'vercel': ['vercel', 'whoami'], 'wrangler (Cloudflare)': ['wrangler', 'whoami'],
+    'aws': ['aws', 'sts', 'get-caller-identity'], 'gcloud': ['gcloud', 'auth', 'print-identity-token', '--quiet'],
+    'az (Azure)': ['az', 'account', 'show'], 'fly': ['fly', 'auth', 'whoami'], 'netlify': ['netlify', 'status'],
+    'supabase': ['supabase', 'projects', 'list'], 'stripe': ['stripe', 'config', '--list'], 'heroku': ['heroku', 'auth:whoami'],
+    'railway': ['railway', 'whoami'], 'doctl (DigitalOcean)': ['doctl', 'account', 'get'], 'npm': ['npm', 'whoami'],
+    'docker': ['docker', 'info'], 'firebase': ['firebase', 'projects:list'], 'kubectl': ['kubectl', 'config', 'current-context'],
+    'terraform': ['terraform', 'version'], 'linear (bin/linear)': [os.path.join(lib.HERE, 'linear'), 'teams'],
+}
+
+
+def run(argv, timeout=25):
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        return p.returncode, (p.stdout or '') + (p.stderr or '')
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, type(e).__name__
+
+
+def main(a):
+    if a[:1] != ['scan']:
+        print(__doc__); sys.exit(1)
+    repo = lib.find_repo(required=False)
+    clis = dict(CLIS)
+    if repo and os.path.exists(os.path.join(repo, '.autopilot', 'access.json')):
+        clis.update(lib.read_json(os.path.join(repo, '.autopilot', 'access.json')))
+    out = {'cli': [], 'mcp': [], 'env': []}
+    for name, argv in clis.items():
+        if not (shutil.which(argv[0]) or os.path.exists(argv[0])):
+            continue
+        out['cli'].append({'name': name, 'logged_in': run(argv)[0] == 0, 'check': ' '.join(os.path.basename(argv[0]) if i == 0 else x for i, x in enumerate(argv))})
+    if shutil.which('claude'):
+        for line in run(['claude', 'mcp', 'list'], 90)[1].splitlines():
+            mt = re.match(r'^(.+?): .* - (.+)$', line.strip())
+            if mt:
+                out['mcp'].append({'name': mt.group(1), 'state': re.sub(r'^\W+', '', mt.group(2))})
+    env = os.path.join(repo or '.', '.env')
+    if os.path.exists(env):
+        out['env'] = sorted({mt.group(1) for mt in (re.match(r'\s*(?:export\s+)?([A-Za-z_]\w*)=.', l) for l in open(env, errors='replace')) if mt})
+    if '--json' in a:
+        print(json.dumps(out, indent=1)); return
+    print('CLIs installed (not listed: not installed):')
+    for x in out['cli']: print('  %-24s %-14s %s' % (x['name'], 'logged in' if x['logged_in'] else 'NOT LOGGED IN', x['check']))
+    print('MCP servers of this harness:' if out['mcp'] else 'MCP servers: none listed by `claude mcp list` (check the session\'s own tool list)')
+    for x in out['mcp']: print('  %-40s %s' % (x['name'], x['state']))
+    print('.env variables (names only): %s' % (', '.join(out['env']) or 'none'))
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

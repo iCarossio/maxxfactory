@@ -768,7 +768,32 @@ def tick():
         auto_start(lib.load_state(M), c)
     sync_attention(lib.load_state(M))
     collect(c)
+    watch_logins(c)
     return len(lib.load_state(M).get('inflight', {}))
+
+
+def watch_logins(c):
+    """Every `login_check_minutes` (default 30): a CRITICAL alert for each account the run depends on that is logged
+    out or whose login expires within `login_warn_hours` (default 12), the coordinator's own first. The owner can
+    only log in again while awake, so the warning must come hours before the login ends (2026-11-22)."""
+    stamp = os.path.join(PD, 'logins.stamp')
+    every = float(c.get('login_check_minutes', 30) or 0) * 60
+    if not every or (os.path.exists(stamp) and time.time() - os.path.getmtime(stamp) < every):
+        return
+    open(stamp, 'w').close()
+    try:
+        ad = lib.adapters()
+        for x in lib.logins(ad=ad, min_hours=float(c.get('login_warn_hours', 12)), repo=M):
+            key = '%s/%s' % (x['cli'], x['account'])
+            if x['problem']:
+                who = 'the COORDINATOR account %s (the run dies with it)' % key if x['coordinator'] else key
+                lib.raise_alert(M, 'login', key, 'CRITICAL: %s %s' % (key, x['problem']),
+                                '%s: %s; the owner runs `%s`' % (who, x['problem'], lib.login_fix(x, ad)))
+                log('login %s: %s' % (key, x['problem']))
+            else:
+                lib.resolve_alert(M, 'login', key)
+    except Exception as e:
+        log('login check error %r' % (e,))
 
 
 def collect(c):

@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""permit: the permission rules an unattended run needs, written before the owner leaves (Claude Code coordinators).
+
+On 2026-11-22 a run waited a whole night because the coordinator was not allowed to run `gh workflow run publish.yml`
+and nobody was there to answer. Every command and MCP tool the plan needs is therefore pre-allowed up front.
+
+Wanted rules = templates/permissions.json (the runtime's own scripts) + <repo>/.autopilot/permissions.json (the
+project's: checks, deploys, DNS, mail, MCP tools; each with why and who approved it).
+
+  permit suggest [--no-mcp]             # ANTICIPATE: candidate rules read from the repo (dispatchable GitHub workflows,
+                                        # package scripts, Makefile, deploy configs, git push, pull requests) and the
+                                        # connected MCP servers, minus what is already allowed. Nothing is recorded:
+                                        # `permit add` those the plan really uses.
+  permit check [--json]                 # wanted rules missing from the effective settings, one per line; exit 1 when any
+  permit add '<rule>' --why TEXT [--by NAME]
+                                        # record a project rule in .autopilot/permissions.json (not applied yet), e.g.
+                                        #   permit add 'Bash(gh workflow run publish.yml *)' --why "PLAN A2: publish to production"
+                                        #   permit add 'mcp__cloudflare__execute' --why "PLAN A3: DNS switch"
+  permit note '<prose>'                 # an auto-mode exception in plain words (autoMode.allow), for actions no rule can
+                                        # name, e.g. "Deploying this repo's Vercel project to production is approved by the owner"
+  permit apply [--project]              # merge what is missing into the user settings, $CLAUDE_CONFIG_DIR/settings.json:
+                                        # global on this machine, so every worktree and later session has them
+                                        # (--project: <repo>/.claude/settings.local.json instead, this checkout only).
+                                        # Notes always go to the user settings: auto mode reads them nowhere else.
+                                        # Never removes or reorders anything.
+  permit list                           # the wanted rules with their why
+
+The owner is shown the list (`permit check`) and asked for consent once, at the human-prerequisites gate of planning.
+Settings files are protected by Claude Code: an agent that writes them is prompted (default mode) or sent to the
+classifier (auto mode). So after the yes, the agent runs `permit apply`; if the harness refuses that write, the owner
+types `! <bin>/permit apply` in the session. It takes effect at once, without a restart. A rule auto mode would silently drop (`Bash(*)`, `Bash(python *)`, `Bash(timeout *)`,
+a leading wildcard, `mcp__*`) is refused here, and so are `sudo` and `rm` rules.
+"""
+import glob, json, os, re, shutil, subprocess, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+INTERP = r'(python\d?|node|bash|sh|zsh|ruby|perl|deno|bun|npx|uvx|env|eval|exec|xargs|timeout|time|nice|nohup|command|sudo|rm|rmdir)'
+BAD = [(r'^Bash\(\s*\*', 'starts with a wildcard'), (r'^Bash\(%s[ :]*\*?\)$' % INTERP, 'an interpreter or wrapper followed only by a wildcard'),
+       (r'^Bash\((sudo|rm|rmdir)\b', 'sudo and rm are never pre-allowed'), (r'^mcp__\*', 'a glob needs a literal mcp__<server>__ prefix'),
+       (r'^(Agent|Monitor)\b', 'dropped by auto mode')]
+DEFAULTS = '$defaults'
+
+
+def opt(a, name, default=None):
+    return a[a.index(name) + 1] if name in a else default
+
+
+def refuse(rule):
+    if not re.match(r'^(Bash\(.+\)|mcp__[\w-]+(__[\w*-]+)?|(Read|Edit|Write|WebFetch|WebSearch)(\(.+\))?)$', rule):
+        return 'not a rule: Bash(<command> *), mcp__<server>__<tool>, mcp__<server>'
+    return next((why for rx, why in BAD if re.search(rx, rule)), None)
+
+
+def user_settings():
+    return os.path.join(os.path.expanduser(os.environ.get('CLAUDE_CONFIG_DIR') or '~/.claude'), 'settings.json')
+
+
+def read(path):
+    try:
+        return lib.read_json(path)
+    except (OSError, ValueError):
+        return {}
+
+
+def project_file(repo):
+    return os.path.join(repo, '.autopilot', 'permissions.json')
+
+
+def wanted(repo):
+    """([(rule, why)], [notes])"""
+    home = os.path.expanduser('~')
+    base = lib.read_json(os.path.join(lib.HOME, 'templates', 'permissions.json'))['permissions']['allow']
+    rules = [(r.replace('{HOME}', home), 'maxxfactory runtime') for r in base]
+    proj = read(project_file(repo)) if repo else {}
+    rules += [(x['rule'], x.get('why', '')) for x in proj.get('allow', [])]
+    return list(dict(rules).items()), list(proj.get('notes', []))
+
+
+def effective(repo):
+    files = [user_settings()] + ([os.path.join(repo, '.claude', f) for f in ('settings.json', 'settings.local.json')] if repo else [])
+    allow = set()
+    for f in files:
+        allow.update((read(f).get('permissions') or {}).get('allow') or [])
+    return allow, set((read(user_settings()).get('autoMode') or {}).get('allow') or [])
+
+
+def missing(repo):
+    rules, notes = wanted(repo)
+    allow, auto = effective(repo)
+    return [(r, w) for r, w in rules if r not in allow], [n for n in notes if n not in auto]
+
+
+DEPLOY = [  # (marker files, rules, why)
+    (('vercel.json', '.vercel'), ['Bash(vercel deploy *)', 'Bash(vercel env *)', 'Bash(vercel inspect *)'], 'Vercel project'),
+    (('wrangler.toml', 'wrangler.jsonc', 'wrangler.json'), ['Bash(wrangler deploy *)', 'Bash(wrangler pages deploy *)'], 'Cloudflare project'),
+    (('fly.toml',), ['Bash(fly deploy *)'], 'Fly app'), (('netlify.toml',), ['Bash(netlify deploy *)'], 'Netlify site'),
+    (('supabase',), ['Bash(supabase db push *)', 'Bash(supabase functions deploy *)'], 'Supabase project'),
+    (('firebase.json',), ['Bash(firebase deploy *)'], 'Firebase project'),
+]
+MANAGERS = [('pnpm-lock.yaml', 'pnpm'), ('bun.lockb', 'bun'), ('bun.lock', 'bun'), ('yarn.lock', 'yarn'), ('package-lock.json', 'npm')]
+
+
+def suggest(repo, mcp=True):
+    """[(rule, why)]: what a run in this repo is likely to need, read from its files. Candidates only."""
+    out, has = [], lambda f: os.path.exists(os.path.join(repo, f))
+    for wf in sorted(glob.glob(os.path.join(repo, '.github', 'workflows', '*.y*ml'))):
+        try:
+            if 'workflow_dispatch' in open(wf, errors='replace').read():
+                out.append(('Bash(gh workflow run %s *)' % os.path.basename(wf), 'dispatchable workflow'))
+        except OSError:
+            pass
+    if has('.github') or has('.git'):
+        out += [(r, 'GitHub: pull requests and CI runs') for r in ('Bash(git push *)', 'Bash(gh pr create *)', 'Bash(gh pr merge *)', 'Bash(gh pr checks *)', 'Bash(gh run watch *)', 'Bash(gh run view *)', 'Bash(gh run list *)')]
+    if has('package.json'):
+        pm = next((m for f, m in MANAGERS if has(f)), 'npm')
+        out.append(('Bash(%s install *)' % pm, 'dependencies'))
+        for name in sorted((read(os.path.join(repo, 'package.json')).get('scripts') or {})):
+            if re.match(r'^[\w:.-]+$', name):
+                out.append(('Bash(%s run %s *)' % (pm, name), 'package script'))
+    if has('Makefile'): out.append(('Bash(make *)', 'Makefile targets'))
+    if has('pyproject.toml') or has('pytest.ini'): out += [('Bash(pytest *)', 'Python tests'), ('Bash(uv run pytest *)', 'Python tests')]
+    if has('Cargo.toml'): out += [('Bash(cargo test *)', 'Rust checks'), ('Bash(cargo build *)', 'Rust checks'), ('Bash(cargo clippy *)', 'Rust checks')]
+    if has('go.mod'): out += [('Bash(go test *)', 'Go checks'), ('Bash(go build *)', 'Go checks'), ('Bash(go vet *)', 'Go checks')]
+    for markers, rules, why in DEPLOY:
+        if any(has(f) for f in markers): out += [(r, why) for r in rules]
+    if mcp and shutil.which('claude'):
+        try:
+            txt = subprocess.run(['claude', 'mcp', 'list'], capture_output=True, text=True, timeout=90, stdin=subprocess.DEVNULL).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            txt = ''
+        for line in txt.splitlines():
+            mt = re.match(r'^(.+?): .* - \W*Connected', line.strip())
+            if mt: out.append(('mcp__' + re.sub(r'[^A-Za-z0-9_-]', '_', mt.group(1)), 'MCP server, every tool: only if the plan writes through it'))
+    allow = effective(repo)[0] | {r for r, _ in wanted(repo)[0]}
+    return [(r, w) for r, w in dict(out).items() if r not in allow and not refuse(r)]
+
+
+def write(path, fn):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with lib.locked(path):
+        d = read(path)
+        fn(d)
+        tmp = path + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(d, f, indent=2); f.write('\n')
+        os.replace(tmp, path)
+
+
+def main(a):
+    repo = lib.find_repo(required=False)
+    cmd = a[0] if a else ''
+    if cmd == 'suggest':
+        if not repo: sys.exit('permit suggest: no project (.autopilot/state.json) here')
+        cand = suggest(repo, '--no-mcp' not in a)
+        for r, w in cand: print('%-60s # %s' % (r, w))
+        print('permit: %d candidate rule(s), none recorded. For each one the plan uses: permit add \'<rule>\' --why "<A row or ticket>"' % len(cand))
+        return
+    if cmd == 'check':
+        mr, mn = missing(repo)
+        if '--json' in a:
+            print(json.dumps({'rules': [r for r, _ in mr], 'notes': mn}, indent=1))
+        else:
+            for r, w in mr: print('MISSING rule %s%s' % (r, '   # ' + w if w else ''))
+            for n in mn: print('MISSING note %s' % n)
+            print('permissions: %s' % ('%d rule(s), %d note(s) missing -> show them to the owner; on their yes: `%s apply` (refused by the harness: the owner types it with a leading `! `)' % (len(mr), len(mn), os.path.realpath(__file__)) if mr or mn else 'nothing missing'))
+        sys.exit(1 if mr or mn else 0)
+    if cmd in ('add', 'note') and len(a) >= 2:
+        if not repo: sys.exit('permit %s: no project (.autopilot/state.json) here' % cmd)
+        if cmd == 'add':
+            why = opt(a, '--why') or sys.exit('permit add: --why "<the plan row or the ticket that needs it>" is required')
+            bad = refuse(a[1])
+            if bad: sys.exit('permit add: refused %s: %s' % (a[1], bad))
+            entry = {'rule': a[1], 'why': why, 'by': opt(a, '--by', ''), 'at': lib.now().isoformat()[:16]}
+            write(project_file(repo), lambda d: d.setdefault('allow', []).append(entry) if a[1] not in [x['rule'] for x in d.get('allow', [])] else None)
+        else:
+            write(project_file(repo), lambda d: d.setdefault('notes', []).append(a[1]) if a[1] not in d.get('notes', []) else None)
+        print('recorded in %s; not applied yet: `permit check`, then, with the owner\'s consent, `%s apply`' % (os.path.relpath(project_file(repo)), os.path.realpath(__file__)))
+        return
+    if cmd == 'apply':
+        mr, mn = missing(repo)
+        target = os.path.join(repo, '.claude', 'settings.local.json') if '--project' in a and repo else user_settings()
+        if mr:
+            write(target, lambda d: d.setdefault('permissions', {}).setdefault('allow', []).extend(r for r, _ in mr))
+        if mn:
+            def notes(d):
+                cur = d.setdefault('autoMode', {}).setdefault('allow', [DEFAULTS])
+                cur.extend(n for n in mn if n not in cur)
+            write(user_settings(), notes)
+        print('permit: %d rule(s) added to %s%s' % (len(mr), target, ', %d note(s) to %s' % (len(mn), user_settings()) if mn else ''))
+        for r, w in mr: print('  + %s%s' % (r, '   # ' + w if w else ''))
+        return
+    if cmd == 'list':
+        rules, notes = wanted(repo)
+        for r, w in rules: print('%-90s %s' % (r, w))
+        for n in notes: print('note: %s' % n)
+        return
+    print(__doc__); sys.exit(1)
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

@@ -84,12 +84,20 @@ concern). A milestone added later goes through `bin/milestone add`, which append
 - <project-specific rules derived from the guardrails: forbidden shortcuts, required tests, data sampled from real inputs>
 
 ## Human prerequisites
-Everything only a human can do, asked in one batch before the Linear project exists, so the run never waits for it: accounts, API keys and tokens, OAuth apps, paid plans, DNS, access grants, real data or exports, devices, sign-offs. Not listed here: anything an agent can do with the access it already has. Secrets are handed over with `! pbcopyenv <NAME>` (into `.env`, never pasted in the chat); "How verified" is a command that proves it works without printing the value. Status: `provided` (verified on <date>), or `deferred` (the owner's words, the fallback shipped meanwhile, and the tickets held back, which are scheduled last). Nothing stays `missing` at approval.
+The agents do the maximum themselves, so the owner is asked for access, not for clicks. Not listed: anything an agent can do with the access it already has (`bin/access scan`). Route `access`: a login, an MCP connection or a token with exact scopes, after which the agents do the work. Route `human`: only what no CLI, MCP tool or API can do, with the reason. Asked in one batch before the Linear project exists. Secrets are handed over with `! pbcopyenv <NAME>` (into `.env`, never pasted in the chat); "How verified" is a command that proves the right without printing the value. Status: `provided` (verified on <date>), or `deferred` (the owner's words, the fallback shipped meanwhile, and the tickets held back, which are scheduled last). Nothing stays `missing` at approval.
 
-| # | What the owner provides | Needed by (tickets) | How handed over | How verified (command -> expected) | Status |
-|---|---|---|---|---|---|
-| H1 | <e.g. Stripe test-mode secret key> | <billing-api, billing-e2e> | `! pbcopyenv STRIPE_SECRET_KEY` | `bin/check-stripe` -> exit 0 | missing |
-| H2 | <e.g. DNS record for app.example.com> | <deploy> | owner adds the CNAME | `dig +short app.example.com` -> the target | deferred: "IT does it Monday"; fallback: preview URL; holds back `deploy` |
+| # | What the owner provides | Route (why, when `human`) | Needed by (tickets) | How handed over | How verified (command -> expected) | Status |
+|---|---|---|---|---|---|---|
+| H1 | <e.g. Cloudflare API token, `Zone.DNS:Edit` on example.com> | access | <dns-cutover> | `! pbcopyenv CLOUDFLARE_API_TOKEN` | `bin/check-dns-token` -> lists the zone's records | missing |
+| H2 | <e.g. sign-off on the landing page design> | human: a judgement only the owner can make | <landing-polish> | reply in the session | decision `D-<n>` | deferred: "Monday"; fallback: ship behind a flag; holds back `landing-launch` |
+
+## Pre-authorized actions
+Every action the run takes outside the repo, or that the harness would otherwise stop to ask about: approved here once by the owner, added to the allowed commands of the machine with `bin/permit` on their consent, then run by the coordinator itself under the stated condition. Never listed: paying for credits or a plan, deleting data, a repository or a production resource.
+
+| # | Action | Command or MCP tool (the rule) | When, and on what condition | Approved |
+|---|---|---|---|---|
+| A1 | <e.g. publish the site to production> | `Bash(gh workflow run publish.yml *)` | <after the final QA passes on preview> | <owner, date> |
+| A2 | <e.g. switch DNS to the new host> | `mcp__cloudflare__execute` | <after A1 is verified on production> | <owner, date> |
 
 ## Open human decisions
 - <decision, safe default shipped meanwhile, who decides>

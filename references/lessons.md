@@ -201,3 +201,11 @@ Symptom: the owner asks "are we done?" and gets a long status with a table; hour
 
 ## Parity suites read a dist/ the site tests were rebuilding (2026-11-22, escape.tech)
 Symptom: a final QA run had landing visual captures fail with `net::ERR_HTTP_RESPONSE_CODE_FAILURE` on pages that exist; dist/*.html timestamps were newer than the build step. Cause: the site's `npm test` ran in the background in the same worktree and rebuilt dist/ while parity:visual served it. Also: running the parity suites by hand without `PARITY_BASE=http://localhost:$SERVE_PORT` made them hit whatever listened on the default port 4321 (the test suite's server). Rule: run site tests in their own detached worktree, never beside parity suites on the same dist; always export PARITY_BASE with SERVE_PORT, as the QA runner does.
+
+## A night lost to a login, a permission and two manual steps (2026-11-22, escape.tech)
+Symptom: the coordinator's Claude login ended in the middle of the night; after the resume, the run waited until morning on `gh workflow run publish.yml`, which the permission system refused, and on a DNS switch planned as an owner click although a Cloudflare tool was connected.
+Causes: nothing read the login's end date (`claude auth status` reports it); the permission template forbade pre-allowing a publish, so the one outward action of the plan needed a human; the plan listed manual steps without first checking what a CLI, an MCP tool or an API could do.
+Rules:
+- `bin/harness logins` before a run and on every resume; a login that ends before the run does is renewed first. The pipeline alerts 12 hours ahead.
+- Every outward action is a row of the plan's `Pre-authorized actions`, approved once and pre-allowed with `bin/permit`; the owner types `! bin/permit apply` (an agent cannot write its own settings).
+- `bin/access scan` before any prerequisite is asked: ask for access, not for clicks.

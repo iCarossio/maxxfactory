@@ -1469,3 +1469,86 @@ def run_state(repo, st=None, procs=None):
             why += ' | waiting on owner: ' + owner_txt
     return {'state': state, 'why': why, 'live': live, 'owner': owner, 'stuck': stuck, 'ready': ready,
             'line': 'RUN: %s | %s' % (state, why)}
+
+
+# ---------- logins (is every account still logged in, and until when) ----------
+# 2026-11-22: the coordinator's own Claude login reached its expiry in the middle of the night and the run died with
+# it. A login is checked with the CLI's own status command when the adapter declares one (`account_login.status`:
+# `argv`, then either `json` keys `logged_in` / `expires_at`, or an `ok` regex on the output), else by its login file.
+
+def login_status(a, home=None):
+    """{'logged_in': True | False | None (cannot tell), 'expires_at': datetime | None, 'note': str} for one account
+    of a harness. `home` is the account directory (None = the CLI's default account). Nothing secret is read."""
+    spec = a.get('account_login') or {}
+    st = spec.get('status')
+    if st and installed(a):
+        env = dict(os.environ)
+        k = a.get('account_env')
+        if k:
+            env.pop(k, None)
+            default = os.path.expanduser(a.get('account_default', '')).rstrip('/')
+            if home and os.path.realpath(home) != os.path.realpath(default):
+                env[k] = home
+        try:
+            p = subprocess.run([a.get('binary', a['name'])] + list(st['argv']), capture_output=True, text=True, env=env,
+                               timeout=st.get('timeout', 30), stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return {'logged_in': None, 'expires_at': None, 'note': 'status command failed: %s' % type(e).__name__}
+        out = (p.stdout or '') + (p.stderr or '')
+        if st.get('json'):
+            try:
+                d = json.loads(p.stdout[p.stdout.index('{'):])
+            except ValueError:
+                return {'logged_in': False if p.returncode else None, 'expires_at': None, 'note': 'status output not readable'}
+            exp = d.get(st['json'].get('expires_at') or '')
+            try:
+                exp = parse_time(exp) if exp else None
+            except (ValueError, TypeError):
+                exp = None
+            return {'logged_in': bool(d.get(st['json'].get('logged_in', 'loggedIn'))), 'expires_at': exp, 'note': ''}
+        return {'logged_in': p.returncode == 0 and bool(re.search(st.get('ok', '.'), out, re.I)), 'expires_at': None, 'note': ''}
+    if spec.get('file') and (home or a.get('account_default')):
+        f = os.path.join(home or os.path.expanduser(a['account_default']), spec['file'])
+        # a missing file proves nothing: CLIs move their credentials (opencode left auth.json for its own store)
+        return {'logged_in': True if os.path.exists(f) else None, 'expires_at': None, 'note': 'login file only'}
+    return {'logged_in': None, 'expires_at': None, 'note': 'no login check for this harness'}
+
+
+def logins(reg=None, ad=None, min_hours=48, repo=None):
+    """One row per account the run depends on: every account with a selectable roster entry, plus the coordinator's
+    own. `problem` is set when the account is not logged in, or its login expires within `min_hours`."""
+    if os.environ.get('AUTOPILOT_LOGIN_CHECK') == 'off':
+        return []
+    ad = ad or adapters()
+    reg = reg if reg is not None else load_reg(warn=False)
+    ca = coordinator_account(reg, repo, ad)
+    pex = project_excludes(repo) if repo else None
+    want = {}  # (cli, account label) -> home
+    for k, m in reg.get('models', {}).items():
+        a = ad.get(m.get('cli'))
+        if not a or excluded_reason(reg, k, m, a, pex):
+            continue
+        home = explicit_account(m, a)
+        want[(m['cli'], account_of(m, a))] = os.path.expanduser(home) if home else None
+    if ca and ad.get(ca[0]):
+        want.setdefault(ca, os.path.expanduser(ca[1].split('=', 1)[1]) if '=' in ca[1] else None)
+    rows, t = [], now()
+    for (cli, acc), home in sorted(want.items()):
+        s = login_status(ad[cli], home)
+        hours = (s['expires_at'] - t).total_seconds() / 3600 if s['expires_at'] else None
+        problem = None
+        if s['logged_in'] is False:
+            problem = 'not logged in'
+        elif hours is not None and hours < min_hours:
+            problem = 'login expired' if hours <= 0 else 'login expires in %s' % ('%dh' % hours if hours < 72 else '%dd' % (hours / 24))
+        rows.append({'cli': cli, 'account': acc, 'home': home, 'coordinator': (cli, acc) == ca, 'logged_in': s['logged_in'],
+                     'expires_at': s['expires_at'].isoformat() if s['expires_at'] else None, 'hours_left': hours,
+                     'note': s['note'], 'problem': problem})
+    return rows
+
+
+def login_fix(row, ad=None):
+    """The command the owner types to log that account in again."""
+    a = (ad or adapters())[row['cli']]
+    cmd = '%s %s' % (a.get('binary', row['cli']), ' '.join((a.get('account_login') or {}).get('login') or ['login']))
+    return '%s=%s %s' % (a['account_env'], row['home'], cmd) if row.get('home') and a.get('account_env') else cmd

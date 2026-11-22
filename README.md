@@ -34,7 +34,9 @@ maxxfactory exists because cheap models write good code when the work is planned
 - **KPIs.** No plan starts without measurable expectations: each KPI has a target and a way to measure it (a command, a query, a count, a date). "Works well" is refused.
 - **Definition of done.** Every ticket carries its acceptance criteria and its checks (`CHECKS:` line). Done means the checks pass, a reviewer approved with no blocking finding, and the work is one commit on the project branch.
 - **Deadlines.** Every plan and milestone has a date. The ETA is a schedule of the remaining tickets (stages that run in parallel, one after the other), shown as one progress bar per milestone and mirrored on Linear.
-- **Human prerequisites up front.** Everything only a human can do (creating an account, an API key, an OAuth app, a paid plan, DNS, an access grant, real data, a sign-off) is listed while the plan is written, asked in one batch, and verified with a command before the first ticket starts. The owner hands secrets over with `! pbcopyenv NAME`, never in the chat. What cannot be provided yet is deferred on purpose, with a fallback and the tickets it holds back named. A run that stops at 3 a.m. for an API key is a planning defect, not bad luck.
+- **The agents do the maximum themselves.** Planning starts from what they can already do (`bin/access scan`: CLIs logged in, MCP servers, tokens). What a CLI, an MCP tool or an API can do, they do; the owner is asked for access (a login, a token with exact scopes), not for clicks. What only a human can do is listed with the reason, asked in one batch and verified with a command before the first ticket starts; secrets go through `! pbcopyenv NAME`, never the chat.
+- **Nothing stops on a prompt.** Every outward action of the run (publish, deploy, DNS, mail) is anticipated at planning (`bin/permit suggest` plus a walk of every ticket), approved once in the plan's `Pre-authorized actions` table and, with the owner's consent, added to the allowed commands of the machine; the coordinator then runs it itself. Paying and deleting stay with the owner.
+- **Logins outlast the run.** `bin/harness logins` shows every account and when its login ends; a run does not start on one that ends first, and the pipeline raises a CRITICAL alert 12 hours before.
 - **Pre-mortem.** Before any ticket exists, a flagship of another vendor is told "we are at the deadline and the project failed: why?". Each reason becomes a guardrail: a KPI, a check, a ticket or a rule.
 - **Adversarial review.** No model reviews its own work: the implementer of a ticket never reviews it, and the planner's vendor never reviews the plan. Enforced in code.
 - **Measurable and atomic tickets.** One ticket is one concern, about 400 changed lines at most, one commit, with the files it touches declared so parallel tickets never collide. Bigger is split, tiny is grouped.
@@ -106,7 +108,7 @@ The skills are the interface; they call the runtime in `bin/`, which you can als
 | Command | What it does |
 |---|---|
 | `install.sh [--agents] [--import <models.json>]` | links the skills and creates the user config |
-| `bin/harness` | registry of CLIs, accounts and the model roster: `init`, `discover`, `list`, `check`, `pools`, `adapters`, `whoami`, `add-model`, `add-account`, `subscription`, `set`, `set-home`, `remove`, `new`, `migrate` |
+| `bin/harness` | registry of CLIs, accounts and the model roster: `init`, `discover`, `list`, `check`, `logins`, `pools`, `adapters`, `whoami`, `add-model`, `add-account`, `subscription`, `set`, `set-home`, `remove`, `new`, `migrate` |
 | `bin/run-model` | `run` runs one model for one role and prints one JSON line; also `pool`, `whoami`, `smoke`, `discover`, `health`, `reset`, `wait`, `usage`, `status`, `alerts`, `vendor` |
 | `bin/pipeline` | the ticket clock (implement, rebase, checks, review, fix rounds): `run`, `start`, `fix`, `retry`, `merge`, `status` (first line: the run verdict, `RUN: RUNNING`, `DONE`, `STUCK`, `WAITING ON OWNER` or `STOPPED`), `wait-approval` (the coordinator's wake-up job: approvals, a change of verdict, a tick every 10 minutes) |
 | `bin/mkbrief` | fills the brief of an implementer, reviewer, plan reviewer or diagnosis from `prompts/` |
@@ -118,6 +120,8 @@ The skills are the interface; they call the runtime in `bin/`, which you can als
 | `bin/decision` | the sourced decision log in `PLAN.md` |
 | `bin/state` | locked edits of `.autopilot/state.json` |
 | `bin/alert` | lists, raises and resolves CRITICAL alerts |
+| `bin/access` | what the agents can act with: ops CLIs logged in, MCP servers, `.env` variable names |
+| `bin/permit` | the permission rules a run needs: `suggest`, `check`, `add`, `note`, `apply` (user settings, with the owner's consent) |
 | `bin/rebase-wt` | brings a worktree's ticket work onto the project branch head |
 | `bin/finish` | commits a ticket as one commit, cherry-picks it onto the project branch, removes the worktree |
 | `bin/gc` | removes the worktrees and branches no ticket needs any more (`--dry-run`) |

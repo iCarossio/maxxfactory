@@ -61,7 +61,17 @@
         "plan": "https://api.openai.com/auth|chatgpt_plan_type",
         "account": "https://api.openai.com/auth|chatgpt_account_id"
       }
-    }
+    },
+    "status": {
+      "argv": [
+        "login",
+        "status"
+      ],
+      "ok": "^Logged in"
+    },
+    "login": [
+      "login"
+    ]
   },
   "tokens": {
     "kind": "codex_sessions",
