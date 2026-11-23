@@ -1079,6 +1079,7 @@ elif [ "$(cat $PLD/impl.mode 2>/dev/null)" != noop ]; then
   echo "impl $N" >> "$(cat $PLD/impl.file 2>/dev/null || echo work-$ISS.txt)"
 fi
 printf 'STATUS: %s\nNOTES: %s\n' "$(cat $PLD/impl.status 2>/dev/null || echo done)" "need lib/shared.ts" > "$OUT"
+[ -f $PLD/impl.needs ] && printf 'NEEDS: %s\n' "$(cat $PLD/impl.needs)" >> "$OUT"
 echo "run-model: some stderr line"
 echo "{\"model\": \"fk-c\", \"level\": 3, \"status\": \"ok\", \"run_role\": \"fix\", \"issue\": \"$ISS\", \"out\": \"$OUT\"}"
 EOF
@@ -1256,11 +1257,27 @@ $H/bin/state set pipeline.setup '"touch SETUP_RAN"' >/dev/null; $H/bin/state set
 $H/bin/state set pipeline.auto_start true >/dev/null; TICK
 check "auto_start: queue order, blocked and overlapping Touches skipped, setup ran, up to target_inflight" "$(ST Q-6) $(test -f $SCR/prepo-wt/Q-6/SETUP_RAN && echo setup) $(ST Q-7) $(ST Q-8) $(ST Q-9) $(ST Q-5)" "1 implement setup gone gone 1 implement gone"
 check "a round that changed files outside Touches goes on, and the pipeline logs them" "$(grep -c 'Q-3 r1: outside Touches: .*work-Q-3.txt' $PR/.autopilot/pipeline/pipeline.log)" "1"
-check "implementer brief: Touches is not a fence, blocked only for what is forbidden by name" "$(grep -c 'not a fence' $PR/.autopilot/briefs/Q-3-impl-1.md) $(grep -c '^OUTSIDE:' $PR/.autopilot/briefs/Q-3-impl-1.md) $(grep -c 'cannot be done inside its' $H/prompts/implement.md)" "1 1 0"
+check "implementer brief: stop on a file outside Touches, name it on NEEDS" "$(grep -c 'cannot be done inside its' $PR/.autopilot/briefs/Q-3-impl-1.md) $(grep -c '^NEEDS:' $PR/.autopilot/briefs/Q-3-impl-1.md)" "1 1"
 echo x > $SCR/prepo-wt/Q-9/shared-util.ts; QT Q-11 shared-util.ts; QT Q-12 src/Q-12.ts
 $H/bin/state set queue '["Q-11", "Q-12"]' >/dev/null; $H/bin/state set pipeline.target_inflight $((NIN + 3)) >/dev/null; TICK
 check "auto_start: a file an in-flight ticket changed outside its Touches keeps a queued ticket on that file waiting" "$(ST Q-11) $(ST Q-12)" "gone 1 implement"
 $H/bin/state set pipeline.auto_start false >/dev/null; $H/bin/state set pipeline.auto_merge false >/dev/null
+for q in G-1 G-2 G-3 G-4; do QT $q src/$q.ts; git worktree add -q -b autopilot/$q $SCR/prepo-wt/$q HEAD; done
+printf 'Do not touch: `lib/frozen.ts`\n' >> .autopilot/tickets/G-3.md; $H/bin/state set pipeline.reserved_paths '"(^|/)package\\.json$"' >/dev/null
+echo blocked > $PLD/impl.status
+echo '`lib/free.ts`' > $PLD/impl.needs; $PL start G-1 >/dev/null 2>&1; TICK
+check "blocked on a free file: granted by the loop, Touches widened, round 2 dispatched, no triage" "$(ST G-1) $(grep -c 'G-1 r1: implementer blocked on files -> granted `lib/free.ts`' $PR/.autopilot/pipeline/pipeline.log) $(grep -c '^Touches: `src/G-1.ts`, `tests/`, `lib/free.ts`' .autopilot/tickets/G-1.md) $(grep -c 'Pipeline grant (round 1' .autopilot/tickets/G-1.md)" "2 implement 1 1 1"
+echo '`lib/more.ts`' > $PLD/impl.needs; $H/bin/state set pipeline.max_grants 1 >/dev/null; TICK; $H/bin/state del pipeline.max_grants >/dev/null
+check "max_grants per ticket, then triage" "$(ST G-1) $(grep -c 'max_grants 1 reached' $PR/.autopilot/pipeline/attention.txt)" "2 triage 1"
+echo '`src/G-1.ts`' > $PLD/impl.needs; $PL start G-2 >/dev/null 2>&1; TICK
+check "blocked on a file another in-flight ticket claims -> triage with the reason" "$(ST G-2) $(grep -c '^G-2 r1 triage: implementer blocked in round 1: (files not granted: claimed by G-1 in flight)' $PR/.autopilot/pipeline/attention.txt)" "1 triage 1"
+echo '`lib/frozen.ts`' > $PLD/impl.needs; $PL start G-3 >/dev/null 2>&1; TICK
+echo '`package.json`' > $PLD/impl.needs; $PL start G-4 >/dev/null 2>&1; TICK
+check "a Do-not-touch path and a reserved path are never granted" "$(ST G-3) $(ST G-4) $(grep -c 'Do not touch' $PR/.autopilot/pipeline/attention.txt) $(grep -c 'matches reserved_paths' $PR/.autopilot/pipeline/attention.txt)" "1 triage 1 triage 1 1"
+rm -f $PLD/impl.status $PLD/impl.needs; $H/bin/state del pipeline.reserved_paths >/dev/null
+check "tickets waiting for the coordinator past attention_minutes raise coordinator_silent" "$($H/bin/state set inflight.G-2.stage_at '"2020-01-01T00:00:00+00:00"' >/dev/null; TICK; grep -c '"kind": "coordinator_silent"' $PR/.autopilot/alerts.jsonl)" "1"
+for q in G-1 G-2 G-3 G-4; do $H/bin/state del inflight.$q >/dev/null; done; TICK
+check "answered: coordinator_silent resolved" "$(python3 -c "import json;print(sum(1 for l in open('$PR/.autopilot/alerts.jsonl') for a in [json.loads(l)] if a['kind']=='coordinator_silent' and not a.get('resolved_at')))")" "0"
 unset AUTOPILOT_REPO PIPELINE_SYNC PIPELINE_RUN_MODEL PIPELINE_REVIEW
 check "opencode adapter disables the websearch tool (headless runs cannot answer its prompt)" "$(python3 -c "import json;e=json.load(open('$H/harnesses/opencode.json'))['run']['env'];print(json.loads(e['OPENCODE_CONFIG_CONTENT'])['tools']['websearch'])")" "False"
 RW=$SCR/reap-wt; mkdir -p $RW/web; (cd $RW/web && exec sleep 300) & RSP=$!; sleep 0.5

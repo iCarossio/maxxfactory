@@ -53,7 +53,10 @@ automatic escalation after round 3 applies. Every fix brief ends with the rule t
 `pipeline start` refuses a ticket whose state.json `blockers` are not all in `done` (`--force` overrides).
 `auto_start` starts queued tickets by itself: blockers merged, `Touches` line of the ticket file overlapping neither
 the `Touches` nor the really changed files of a ticket in flight (shared test and docs paths excepted; `Touches` is not
-a fence for the implementer, each round logs `outside Touches: ...`), up to `target_inflight` (0: 2 x max_jobs).
+a fence for the reviewer: each round logs `outside Touches: ...`).
+A blocked implementer that only asks for files (`NEEDS:` line) is granted them by the loop, `max_grants` times per
+ticket, unless a path is reserved (`.autopilot/`, `reserved_paths`, the ticket's `Do not touch:` line) or claimed by
+another ticket in flight; triage, stuck or approved tickets unanswered for `attention_minutes` raise a CRITICAL alert, up to `target_inflight` (0: 2 x max_jobs).
 Settings: state.json `pipeline` {interval 60, max_jobs 3, max_rounds 5, max_rounds_hard 8, max_merges 3,
 review_retries 3, impl_retries 3, retry_minutes 10, check_timeout_minutes 60, check_silence_minutes 25, max_full_jobs 2,
 auto_merge false, auto_start false, target_inflight 0, setup "", merge_prefix "feat"}. With the worktree garbage
@@ -77,7 +80,11 @@ DEFAULTS = {'interval': 60, 'max_jobs': 3, 'max_rounds': 5, 'max_merges': 3, 're
             'max_full_jobs': 2,       # full check suites at once (two-level checks), on top of max_jobs
             'max_rounds_hard': 8,     # past max_rounds a review that keeps converging (fewer findings) goes on, up to here
             'merge_prefix': 'feat',   # subject of an automatic merge: `<prefix>: <ticket title> [<ISSUE>]`
-            'gc_minutes': 60}         # worktree garbage collection (bin/gc) every N minutes; 0: never
+            'gc_minutes': 60,         # worktree garbage collection (bin/gc) every N minutes; 0: never
+            # A run never parks on a coordinator that is silent (out of quota, compacting, turn ended):
+            'max_grants': 3,          # file requests of one ticket the loop grants by itself (0: all go to triage)
+            'reserved_paths': '',     # regex of paths the loop never grants (e.g. `(^|/)package(-lock)?\\.json$`)
+            'attention_minutes': 20}  # triage, stuck or approved left unanswered this long: CRITICAL alert (0: never)
 DRIVEN = ('implement', 'merge', 'rebase', 'review', 'final')
 SHARED = re.compile(r'(^|/)(tests?|__tests__|docs)(/|$)|\.(test|spec)\.|(^|/)test_[^/]*\.py$|_test\.py$')
 GRACE = 90  # seconds before a run or job with no process and no result counts as dead (dispatch races)
@@ -347,6 +354,52 @@ def outside_touches(t, wt, branch):
     """Changed files of the ticket that its `Touches` line does not cover ([] when the ticket has no `Touches`)."""
     tt = touches_of(t)
     return sorted(f for f in changed_files(wt, branch) if not overlaps({f}, tt)) if tt else []
+
+
+def needs_of(res, name):
+    """Repo-relative paths of the `NEEDS:` line of a blocked implementer: the files outside `Touches` it asks for."""
+    p = res.get('out') or os.path.join(OUT, name + '.md')
+    text = open(p, errors='ignore').read() if os.path.exists(p) else ''
+    m = re.findall(r'^\W*NEEDS:(.*)$', text, re.M)
+    return [x.strip() for x in re.findall(r'`([^`]+)`', m[-1])] if m else []
+
+
+def grant(t, v, st, c, need):
+    """A blocked round that only asks for files is settled by the loop (2026-11-23: four tickets blocked on a file
+    waited 4 h 20 for a coordinator session that was silent, with two approved tickets unmerged behind them).
+    Granted: every path is inside the repo, is not reserved (`.autopilot/`, `.git/`, `reserved_paths`, the ticket's
+    `Do not touch:` line) and is claimed by no other ticket in flight (its `Touches` and the files it really
+    changed); at most `max_grants` times per ticket. Returns (granted, reason)."""
+    k = int(v.get('grants') or 0)
+    if not need:
+        return False, 'no NEEDS line'
+    if k >= int(c['max_grants']):
+        return False, 'max_grants %s reached' % c['max_grants']
+    tf = ticket_file(t)
+    body = open(tf).read()
+    dnt = set()
+    for l in re.findall(r'^.*do not touch[^:\n]*:(.*)$', body, re.M | re.I):
+        dnt |= {p.strip().rstrip('/') for p in re.findall(r'`([^`]+)`', l)}
+    need = [os.path.normpath(p) for p in need]
+    for p in need:
+        if os.path.isabs(p) or p.startswith('..') or ' ' in p or re.match(r'\.(autopilot|git)(/|$)', p):
+            return False, '%s is outside the repo or reserved' % p
+        if c['reserved_paths'] and re.search(c['reserved_paths'], p):
+            return False, '%s matches reserved_paths' % p
+        if overlaps({p}, dnt):
+            return False, '%s is on the ticket\'s "Do not touch" line' % p
+    for o, ov in st.get('inflight', {}).items():
+        if o != t and isinstance(ov, dict) and overlaps(set(need), touches_of(o) | changed_files(wt_of(st, o, ov), st['branch'])):
+            return False, 'claimed by %s in flight' % o
+    add = ', '.join('`%s`' % p for p in need)
+    note = '\nPipeline grant (round %s, %s): Touches widened to %s at the implementer\'s request.\n' % (
+        rnd(v), dt.date.today().isoformat(), add)
+    new, n = re.subn(r'^(\W*Touches[^:\n]*:.*)$', lambda m: m.group(1).rstrip() + ', ' + add, body, count=1, flags=re.M | re.I)
+    if not n:
+        return False, 'ticket file has no Touches line'
+    with open(tf, 'w') as f:
+        f.write(new.rstrip('\n') + '\n' + note)
+    return True, add
 
 
 def overlaps(a, b):
@@ -719,6 +772,16 @@ def on_run(t, v, st, c):
         # with an empty diff, and each still paid a full check + review, about an hour, to learn nothing).
         status, notes = impl_report(res, name)
         if status == 'blocked':
+            ok, why = grant(t, v, st, c, needs_of(res, name))
+            if ok and transition(t, stage, r, grants=int(v.get('grants') or 0) + 1):
+                log('%s r%s: implementer blocked on files -> granted %s' % (t, r, why))
+                fix_round(t, dict(v, grants=int(v.get('grants') or 0) + 1), st, c,
+                          'The files you asked for are now inside your Touches: %s. Make the change there as small as '
+                          'the ticket needs and finish the ticket. Your notes of the blocked round: %s' % (why, notes),
+                          'grant', expect='implement')
+                return
+            if needs_of(res, name):
+                notes = '(files not granted: %s) %s' % (why, notes)
             if transition(t, stage, r, stage='triage', why='implementer blocked in round %s: %s' % (r, notes or '(no NOTES)'),
                           findings=res.get('out')):
                 log('%s r%s: implementer BLOCKED -> coordinator (%s)' % (t, r, notes[:200]))
@@ -799,6 +862,7 @@ def tick():
     sync_attention(lib.load_state(M))
     collect(c)
     watch_logins(c)
+    watch_coordinator(lib.load_state(M), c)
     return len(lib.load_state(M).get('inflight', {}))
 
 
@@ -851,6 +915,23 @@ def collect(c):
             lib.resolve_alert(M, 'ci', 'draft')
     except Exception as e:
         log('ci check error %r' % (e,))
+
+
+def watch_coordinator(st, c):
+    """Triage, stuck and approved tickets wait for the coordinator session, which can be silent for hours (out of
+    quota, compacting, turn ended) while the loop keeps ticking: after `attention_minutes` the owner is told."""
+    lim = float(c.get('attention_minutes') or 0) * 60
+    if not lim:
+        return
+    wait = sorted(t for t, v in st.get('inflight', {}).items() if isinstance(v, dict) and age(v) != float('inf')
+                  and age(v) >= lim and (v.get('stage') in ('triage', 'stuck') or (v.get('stage') == 'approved' and not c['auto_merge'])))
+    if wait:
+        lib.raise_alert(M, 'coordinator_silent', 'run', 'CRITICAL: the coordinator does not answer',
+                        '%d ticket(s) wait for the coordinator for more than %d min (%s): resume the session '
+                        '(/maxxfactory-continue), or set pipeline.auto_merge true' % (len(wait), lim // 60, ', '.join(wait)),
+                        {'issues': wait})
+    else:
+        lib.resolve_alert(M, 'coordinator_silent', 'run')
 
 
 def ticket_title(t):

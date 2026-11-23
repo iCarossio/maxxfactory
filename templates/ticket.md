@@ -6,7 +6,7 @@ shared docs), its own port and container name if it starts a server, and the not
 
 CHECKS: <command && command>
 CHECKS_FAST: <optional: what implementers run each round when the project has two-level checks; else state.json checks_fast>
-Touches: `<path>`, `<path>` <the files or folders this ticket expects to change: it keeps parallel tickets apart, it is not a fence. The implementer edits any other file the acceptance needs and reports it. What must not change goes in the instructions, by name: "Do not touch: `<path>`">
+Touches: `<path>`, `<path>` <the files or folders this ticket may change; parallel tickets must not overlap. An implementer that needs another file asks for it and the pipeline grants it when no ticket in flight owns it. A file that must never be granted goes on its own line: "Do not touch: `<path>`">
 
 **Acceptance**
 - <criterion verifiable by the CHECKS line or a named test>
