@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""leak: nothing private goes into the maxxfactory repo. The runtime is shared: its skills, code, tests, lessons and
+commit messages must read the same for every user, so a change records the general rule, never whose project it came from.
+
+  leak check [--all] [--msg FILE]   # exit 0: clean; exit 1: one `LEAK <file>:<line>: <kind> "<match>"` line per finding
+  leak terms                        # the private terms in use (where each comes from), for a quick look
+
+`check` reads the lines the pending change adds (`git diff HEAD` plus untracked files) of the maxxfactory repo this
+script lives in; `--all` reads every tracked file instead; `--msg FILE` also reads a commit message draft. It looks for:
+  identity   the machine's user name and home path, the git user name and e-mail, the host name
+  path       any absolute home path (/Users/<name>/..., /home/<name>/...); write ~/..., <repo>, <repo>-wt
+  email      any e-mail address that is not a placeholder (example.com, noreply)
+  ticket     a tracker identifier (ABC-123) outside the placeholder prefix ENG-; write ENG-1, <ISSUE> (not in tests/)
+  term       a line of $AUTOPILOT_CONFIG_DIR/private-terms.txt (company, product, repo, customer, people, tracker
+             team keys; one per line, `#` comments). That file stays on the machine and is never committed. Add the
+             names of a project there before recording a lesson learnt on it.
+The author lines of LICENSE and .claude-plugin/plugin.json are public by choice and skipped. A finding is fixed by
+generalizing the text, never by weakening this script. A real false positive: end the line with `leak: ok`.
+"""
+import os, re, socket, subprocess, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+REPO = os.environ.get('LEAK_REPO') or os.path.dirname(os.path.dirname(os.path.realpath(__file__)))  # LEAK_REPO: tests
+SKIP = ('LICENSE', '.claude-plugin/plugin.json')
+TERMS = os.path.join(lib.CONFIG_DIR, 'private-terms.txt')
+EMAIL = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+')
+EMAIL_OK = re.compile(r'@(example\.(com|org|net)|users\.noreply\.github\.com|noreply\.|localhost)|^(noreply|git)@', re.I)
+HOME = re.compile(r'(?<![\w$<{])/(?:Users|home)/(?!<)[A-Za-z0-9._-]+')
+TICKET = re.compile(r'(?<![A-Za-z0-9_-])([A-Z][A-Z0-9]{1,9})-\d+[a-z]?(?![A-Za-z0-9_])')
+# Upper-case words followed by a number that are not tracker identifiers.
+TICKET_OK = {'ENG', 'UTF', 'SHA', 'ISO', 'RFC', 'HTTP', 'CVE', 'GPT', 'TLS', 'UTC', 'ES', 'MD', 'AES', 'RSA', 'CP', 'PEP', 'PM', 'GLM'}  # PM-<n>: pre-mortem reason ids
+
+
+def git(*a):
+    return subprocess.run(['git', '-C', REPO] + list(a), capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout
+
+
+def terms():
+    """[(term, source)]: what must never appear, from the machine itself and from the owner's private list."""
+    out = []
+    user = os.environ.get('LEAK_USER') or os.path.basename(os.path.expanduser('~'))
+    if len(user) >= 3:
+        out.append((user, 'user name'))
+    host = socket.gethostname().split('.')[0]
+    if len(host) >= 4 and host.lower() not in ('localhost', 'macbook'):
+        out.append((host, 'host name'))
+    for k in ('user.name', 'user.email'):
+        v = os.environ.get('LEAK_' + k.replace('.', '_').upper()) or git('config', k).strip()
+        if k == 'user.email' and v:
+            out.append((v, 'git ' + k))
+        elif v:
+            out += [(w, 'git ' + k) for w in v.split() if len(w) >= 4]
+    if os.path.exists(TERMS):
+        for l in open(TERMS):
+            l = l.split('#')[0].strip()
+            if l:
+                out.append((l, 'private-terms.txt'))
+    return list(dict.fromkeys(out))
+
+
+def scan(name, lineno, text, pats):
+    if text.rstrip().endswith('leak: ok'):
+        return []
+    found = []
+    for rx, src in pats:
+        m = rx.search(text)
+        if m:
+            found.append(('identity' if src != 'private-terms.txt' else 'term', m.group(0)))
+    m = HOME.search(text)
+    if m:
+        found.append(('path', m.group(0)))
+    for m in EMAIL.finditer(text):
+        if not EMAIL_OK.search(m.group(0)):
+            found.append(('email', m.group(0)))
+    for m in TICKET.finditer(text):
+        if m.group(1) not in TICKET_OK and not name.startswith('tests/'):  # test fixtures invent their own ids
+            found.append(('ticket', m.group(0)))
+    return ['LEAK %s:%s: %s "%s"' % (name, lineno, kind, what) for kind, what in dict.fromkeys(found)]
+
+
+def added_lines():
+    """(file, line number, text) for every line the pending change adds, untracked files included."""
+    cur, n = None, 0
+    for l in git('diff', 'HEAD', '--unified=0', '--no-color').splitlines():
+        if l.startswith('+++ '):
+            cur = l[6:] if l.startswith('+++ b/') else None
+        elif l.startswith('@@'):
+            m = re.search(r'\+(\d+)', l)
+            n = int(m.group(1)) if m else 0
+        elif l.startswith('+') and cur:
+            yield cur, n, l[1:]
+            n += 1
+    for f in git('ls-files', '--others', '--exclude-standard').splitlines():
+        yield from file_lines(f)
+
+
+def file_lines(f):
+    p = os.path.join(REPO, f)
+    if os.path.islink(p) or not os.path.isfile(p):
+        return
+    try:
+        for i, l in enumerate(open(p, encoding='utf-8'), 1):
+            yield f, i, l.rstrip('\n')
+    except (UnicodeDecodeError, OSError):
+        return
+
+
+def main(a):
+    if not a or a[0] not in ('check', 'terms'):
+        print(__doc__); return 2
+    ts = terms()
+    if a[0] == 'terms':
+        for t, src in ts:
+            print('%-20s %s' % (src, t))
+        if not os.path.exists(TERMS):
+            print('no %s yet: add the names of your company, products, repos and tracker team keys, one per line' % TERMS)
+        return 0
+    pats = [(re.compile(r'(?<![A-Za-z0-9])%s(?![A-Za-z0-9])' % re.escape(t), re.I), src) for t, src in ts]
+    if '--all' in a:
+        lines = (x for f in git('ls-files').splitlines() for x in file_lines(f))
+    else:
+        lines = added_lines()
+    out = []
+    for f, n, text in lines:
+        if f in SKIP or f == 'bin/leak':
+            continue
+        out += scan(f, n, text, pats)
+    if '--msg' in a:
+        f = a[a.index('--msg') + 1]
+        for i, l in enumerate(open(f), 1):
+            out += scan(f, i, l.rstrip('\n'), pats)
+    for l in out:
+        print(l)
+    print('leak: %s' % ('%d finding(s): generalize the text (placeholders: ~/code, <repo>, <ISSUE>, ENG-1, "a project")' % len(out)
+                        if out else 'clean'))
+    return 1 if out else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

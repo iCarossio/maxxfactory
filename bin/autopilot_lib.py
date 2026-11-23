@@ -98,8 +98,28 @@ def load_state(repo):
 
 
 def worktrees_dir(repo, st=None):
+    """Where every worktree of a project is created: `<repo>-wt`, next to the repo. Derived from where the repo is
+    now, never read from state.json: a recorded path survives a moved or renamed repo and then sends new worktrees to
+    a place nobody excluded from Spotlight (seen 2026-11-22). `st` is accepted for older callers and ignored."""
+    return os.path.abspath(repo).rstrip('/') + '-wt'
+
+
+def legacy_worktrees_dir(repo, st=None):
+    """A `worktrees_dir` an older version recorded in state.json, when it names another place than `<repo>-wt` (else
+    None). Nothing is created there any more; the worktrees still in it finish there (each in-flight ticket records
+    its own `wt`) and the garbage collection keeps collecting them."""
     st = load_state(repo) if st is None else st
-    return st.get('worktrees_dir') or os.path.join(os.path.dirname(repo), os.path.basename(repo) + '-wt')
+    d = st.get('worktrees_dir')
+    if not d or os.path.realpath(os.path.expanduser(d)) == os.path.realpath(worktrees_dir(repo)):
+        return None
+    return os.path.expanduser(d)
+
+
+def in_worktrees_dir(repo, path, st=None):
+    """True when path is inside the project's worktrees directory (or the legacy one of an older state.json)."""
+    p = os.path.realpath(path) + '/'
+    roots = [worktrees_dir(repo), legacy_worktrees_dir(repo, st)]
+    return any(p.startswith(os.path.realpath(r).rstrip('/') + '/') for r in roots if r)
 
 
 # ---------- Spotlight (macOS): agents rewrite thousands of files per hour; an indexed tree keeps mds busy ----------
@@ -120,9 +140,27 @@ def spotlight_count(d):
     return n
 
 
+def code_folder(repo):
+    """The folder that holds the repo and, next to it, its `<repo>-wt` worktrees directory: the one folder to exclude
+    from Spotlight. None when that folder is the home directory, a volume root or `/` (nobody excludes those)."""
+    parent = os.path.dirname(os.path.realpath(repo).rstrip('/'))
+    home = os.path.realpath(os.path.expanduser('~'))
+    if (home + '/').startswith(parent.rstrip('/') + '/') or os.path.ismount(parent):
+        return None
+    return parent
+
+
 def spotlight_dirs(repo):
-    """The trees agents write to: the repo and its worktrees directory (the ones that exist)."""
-    return [d for d in dict.fromkeys([os.path.realpath(repo), os.path.realpath(worktrees_dir(repo))]) if os.path.isdir(d)]
+    """The trees agents write to, as the folders to check: the folder that holds the repo and its `<repo>-wt`
+    (code_folder), so a worktrees directory that does not exist yet, or was just emptied, is covered too. Without a
+    usable parent folder: the repo and its worktrees directory themselves. Plus the worktrees directory of an older
+    state.json while it still exists."""
+    parent = code_folder(repo)
+    dirs = [parent] if parent else [os.path.realpath(repo), os.path.realpath(worktrees_dir(repo))]
+    legacy = legacy_worktrees_dir(repo)
+    if legacy and not any((os.path.realpath(legacy) + '/').startswith(d.rstrip('/') + '/') for d in dirs):
+        dirs.append(os.path.realpath(legacy))
+    return [d for d in dict.fromkeys(dirs) if os.path.isdir(d)]
 
 
 def spotlight_indexed(dirs):
@@ -614,6 +652,7 @@ DEFAULT_TIER_TABLE = [
     {'match': r'claude-sonnet', 'level': 2}, {'match': r'mistral-large-[\d-]+', 'level': 2, 'why': 'Mistral Large 4 ("Le Chonk") on Vibe: the one Mistral model above Tier 4'}, {'match': r'gpt-[\d.]+-terra', 'level': 2}, {'match': r'gemini-3\.8-flash(?!-lite)', 'level': 2}, {'match': r'gemini-[\d.]+-hydrogen', 'level': 2},
     {'match': r'grok-4\.7', 'level': 2}, {'match': r'grok-4\.3', 'level': 2}, {'match': r'qwen[\d.]+-plus', 'level': 2},
     {'match': r'opencode-go/deepseek-v[\d.]+-flash', 'level': 2, 'why': 'OpenCode Go DeepSeek Flash is Tier 2; the free id stays Tier 4'},
+    {'match': r'zai-coding-plan/glm-5\.4(?![\d-])', 'level': 2, 'why': 'GLM 5.4 on a Z.ai coding plan (through opencode) is the Tier 2 GLM of that plan, in place of GLM 5.3 Flash: the plan gives it about 50% more usage (2026-11-22)'},
     {'match': r'deepseek-v[\d.]+-flash|glm-[\d.]+-flash|qwen[\d.]+-flash', 'level': 2, 'why': 'the Max, Pro and plain GLM models are Tier 1, their Flash models Tier 2 (free ids stay Tier 4)'},
     {'match': r'claude-haiku', 'level': 3}, {'match': r'gpt-[\d.]+-luna', 'level': 3}, {'match': r'gemini-[\d.]+-flash-lite', 'level': 3},
     {'match': r'glm-[\d.]+', 'level': 1},
@@ -1212,6 +1251,49 @@ def reap_worktree(path, sig=signal.SIGTERM):
     return done
 
 
+# ---------- CI on the project branch: nothing runs while the PR is a draft ----------
+
+CI_EVENTS = ('push', 'pull_request', 'pull_request_target')
+
+
+def ci_findings(repo, st=None):
+    """What breaks the rule "the project's PR is a draft and no CI run starts on its pushes until it is ready to
+    merge" (2026-11-22: a workflow ran, failed and mailed the owner on every push of a draft PR, one push per ticket).
+    Returns a list of `CI: ...` lines (empty: clean), or None when it cannot tell (push off, no `gh`, not GitHub,
+    network). Looks at the open PR of state.json `branch` and at the workflow runs of the last pushed commit; a run
+    that was skipped costs nothing and is fine. state.json `pr_ready: true` (set at wrap-up, once the owner said the
+    work is ready to merge) turns the rule off: CI is then meant to run."""
+    st = load_state(repo) if st is None else st
+    br = st.get('branch')
+    gh = os.environ.get('AUTOPILOT_GH') or shutil.which('gh')
+    if not st.get('push') or not br or st.get('pr_ready') or not gh or gh == 'off':
+        return None
+
+    def run(*a):
+        try:
+            p = subprocess.run([gh] + list(a), cwd=repo, capture_output=True, text=True, timeout=40, stdin=subprocess.DEVNULL)
+            return json.loads(p.stdout) if p.returncode == 0 else None
+        except (subprocess.SubprocessError, ValueError, OSError):
+            return None
+    prs = run('pr', 'list', '--head', br, '--state', 'open', '--json', 'number,isDraft,url')
+    runs = run('run', 'list', '--branch', br, '--limit', '40', '--json', 'workflowName,event,conclusion,status,headSha,url')
+    if prs is None or runs is None:
+        return None
+    out = ['CI: PR #%s of %s is not a draft: `gh pr ready --undo %s` (a PR is marked ready only when the work is ready to merge)'
+           % (p.get('number'), br, p.get('number')) for p in prs if not p.get('isDraft')]
+    head = git(repo, 'rev-parse', '-q', '--verify', 'refs/remotes/origin/' + br).stdout.strip()
+    seen = set()
+    for r in runs:
+        if r.get('headSha') != head or r.get('event') not in CI_EVENTS or r.get('conclusion') == 'skipped':
+            continue
+        k = (r.get('workflowName'), r.get('event'))
+        if k not in seen:
+            seen.add(k)
+            out.append('CI: workflow "%s" ran on the last push of %s (%s, %s): %s' % (
+                k[0], br, k[1], r.get('conclusion') or r.get('status') or 'running', r.get('url') or ''))
+    return out
+
+
 # ---------- worktree garbage collection ----------
 
 GC_EMPTY_HOURS = 24  # an untouched worktree nobody started (no change, no commit) is kept this long
@@ -1219,15 +1301,15 @@ GC_EMPTY_HOURS = 24  # an untouched worktree nobody started (no change, no commi
 
 def gc_worktrees(repo, dry=False, now=None):
     """Removes the worktrees no ticket needs any more, so agents, checks, the indexer and the disk only see the ones
-    in flight. Only worktrees under the project's worktrees directory are looked at; one that is in flight, queued or
-    locked is never touched. Removed: a worktree whose ticket is in `done` (work found in it is saved first as a patch
+    in flight. Only worktrees under the project's worktrees directory (`<repo>-wt`, and the directory an older
+    state.json recorded) are looked at; one that is in flight, queued or locked is never touched. Removed: a worktree whose ticket is in `done` (work found in it is saved first as a patch
     in .autopilot/gc/), and one with no change and no commit of its own for GC_EMPTY_HOURS. A worktree that is not in
     flight but holds work is never removed: it is reported as an orphan for the coordinator to merge or drop.
     `autopilot/*` branches left without a worktree go too when their ticket is done or they hold no commit.
     Returns [(action, path or branch, detail)] with action in removed, branch, orphan, pruned."""
     st = load_state(repo)
     now = now or time.time()
-    root = os.path.realpath(worktrees_dir(repo, st)).rstrip('/') + '/'
+    root = os.path.realpath(worktrees_dir(repo)).rstrip('/') + '/'
     base = st.get('branch') or 'HEAD'
     inflight = st.get('inflight') or {}
     done = set(st.get('done') or [])
@@ -1254,7 +1336,7 @@ def gc_worktrees(repo, dry=False, now=None):
         br = (e.get('branch') or '').replace('refs/heads/', '')
         used.add(br)
         t = os.path.basename(wt)
-        if not (wt + '/').startswith(root) or not os.path.isdir(wt):
+        if not in_worktrees_dir(repo, wt, st) or not os.path.isdir(wt):
             continue
         if wt in keep_paths or t in keep_ids or 'locked' in e:
             continue

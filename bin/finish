@@ -1,6 +1,6 @@
 #!/bin/bash
 # finish <ISSUE> "<commit subject>" "<body>"
-# Commit the ticket in its worktree (<worktrees_dir>/<ISSUE>, or $WT) as ONE commit, cherry-pick it onto the project branch,
+# Commit the ticket in its worktree (<repo>-wt/<ISSUE>, or $WT) as ONE commit, cherry-pick it onto the project branch,
 # remove the worktree, push if state.json says push: true. A ticket branch that already has commits of its own (a recovery
 # after a conflict, a merge round's rebase) is squashed with the uncommitted work into that one commit first: a range
 # cherry-pick could take the commits only partly or leave the worktree diverged. Prints `COMMITTED <sha> <ISSUE>`.
@@ -16,13 +16,16 @@ set -e
 ID=$1; SUBJ=$2; BODY=$3
 M=${AUTOPILOT_REPO:-$(d=$PWD; while [ "$d" != / ] && [ ! -f "$d/.autopilot/state.json" ]; do d=$(dirname "$d"); done; echo "$d")}
 [ -f "$M/.autopilot/state.json" ] || { echo "finish: no .autopilot/state.json"; exit 1; }
-IFS=$'\t' read -r BRANCH PUSH WTDIR TRAILER < <(python3 - "$M" <<'PY'
+IFS=$'\t' read -r BRANCH PUSH WTDEF TRAILER < <(python3 - "$M" "$ID" <<'PY'
 import json, os, sys
 m = sys.argv[1]; s = json.load(open(os.path.join(m, '.autopilot', 'state.json')))
-print('\t'.join([s['branch'], 'yes' if s.get('push') else 'no', s.get('worktrees_dir') or os.path.join(os.path.dirname(m), os.path.basename(m) + '-wt'), s.get('trailer', '')]))
+# Worktree of the ticket (no apostrophe in this heredoc: bash rejects one inside <(...)): the one recorded when it went in flight, else <repo>-wt/<ISSUE> (always next to the repo).
+v = (s.get('inflight') or {}).get(sys.argv[2])
+wt = (v.get('wt') if isinstance(v, dict) else None) or os.path.join(os.path.abspath(m).rstrip('/') + '-wt', sys.argv[2])
+print('\t'.join([s['branch'], 'yes' if s.get('push') else 'no', wt, s.get('trailer', '')]))
 PY
 )
-WT="${WT:-$WTDIR/$ID}"  # WT= overrides when the worktree is named after a parent ticket (e.g. ENG-101a for step a1)
+WT="${WT:-$WTDEF}"  # WT= overrides when the worktree is named after a parent ticket (e.g. ENG-101a for step a1)
 # Append the ticket id once: a subject that already ends with it keeps it as is.
 case "$SUBJ" in *"[$ID]"|*"[${ID%[a-z]}]") FULL="$SUBJ" ;; *) FULL="$SUBJ [$ID]" ;; esac
 commit() { if [ -n "$TRAILER" ]; then git commit -q -m "$FULL" -m "$BODY" -m "$TRAILER"; else git commit -q -m "$FULL" -m "$BODY"; fi; }

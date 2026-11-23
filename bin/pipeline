@@ -10,6 +10,10 @@ ticket's worktree, and bin/review.
   pipeline start <ISSUE> [--wt PATH] [--pool P]  # put a planned ticket in flight: round 1 brief + Tier 3 implementer.
                                                   # Sets the Linear state to In Progress (or the team's started state);
                                                   # a Linear failure is a warning and never blocks the start.
+  pipeline wt [NAME] [--detach] [--from REF]     # the one way to create a worktree by hand: prints <repo>-wt, or creates
+                                                  # <repo>-wt/<NAME> if missing (branch autopilot/<NAME> from the project
+                                                  # branch; --detach for a scratch checkout: a suite, a plan review) and
+                                                  # prints its path. Worktrees live next to the repo, in <repo>-wt, nowhere else.
   pipeline fix <ISSUE> <findings.md>             # the coordinator's own next round (after triage, or instead of a stuck step)
   pipeline retry <ISSUE>                         # a stuck ticket: redo the step that got stuck
   pipeline merge <ISSUE> "<subject>" "<body>"    # merge an approved ticket: rebase, squash, bin/finish (exit 3: conflict)
@@ -51,7 +55,8 @@ automatic escalation after round 3 applies. Every fix brief ends with the rule t
 ticket in flight (shared test and docs paths excepted), up to `target_inflight` (0: 2 x max_jobs).
 Settings: state.json `pipeline` {interval 60, max_jobs 3, max_rounds 5, max_rounds_hard 8, max_merges 3,
 review_retries 3, impl_retries 3, retry_minutes 10, check_timeout_minutes 60, check_silence_minutes 25, max_full_jobs 2,
-auto_merge false, auto_start false, target_inflight 0, setup "", merge_prefix "feat"}. Log: .autopilot/pipeline/pipeline.log.
+auto_merge false, auto_start false, target_inflight 0, setup "", merge_prefix "feat"}. With the worktree garbage
+collection (`gc_minutes`) the loop also runs the `bin/ci` check: a CI run on a push of the draft project branch is a CRITICAL alert. Log: .autopilot/pipeline/pipeline.log.
 Tests: PIPELINE_SYNC=1 runs every dispatch in the foreground; PIPELINE_RUN_MODEL, PIPELINE_REVIEW, PIPELINE_FINISH
 (any bin script name) replace that script.
 """
@@ -209,7 +214,7 @@ def rnd(v):
 
 def wt_of(st, t, v=None):
     v = v or st.get('inflight', {}).get(t) or {}
-    return v.get('wt') or os.path.join(lib.worktrees_dir(M, st), t)
+    return v.get('wt') or os.path.join(lib.worktrees_dir(M), t)
 
 
 def ticket_file(t):
@@ -811,6 +816,19 @@ def collect(c):
             log('gc %s %s%s' % (act, what, (': ' + why) if why else ''))
     except Exception as e:
         log('gc error %r' % (e,))
+    # Same cadence: no CI run on the project branch while its PR is a draft (bin/ci).
+    try:
+        found = lib.ci_findings(M)
+        if found:
+            for l in found:
+                log(l)
+            lib.raise_alert(M, 'ci', 'draft', 'CRITICAL: CI runs on the unfinished project branch',
+                            'CI runs on pushes of the project branch before it is ready to merge (%d finding(s)): '
+                            'bin/ci check, then stop pushing and fix the workflows' % len(found))
+        elif found is not None:
+            lib.resolve_alert(M, 'ci', 'draft')
+    except Exception as e:
+        log('ci check error %r' % (e,))
 
 
 def ticket_title(t):
@@ -945,11 +963,40 @@ def cmd_run(a):
         time.sleep(interval)
 
 
+def cmd_wt(a):
+    """The worktrees directory, or one worktree in it (created if missing). Never anywhere else."""
+    st = lib.load_state(M)
+    root = lib.worktrees_dir(M)
+    names = [x for i, x in enumerate(a) if not x.startswith('--') and (i == 0 or a[i - 1] != '--from')]
+    if not names:
+        print(root); return
+    name = names[0]
+    if len(names) > 1 or '/' in name or name.startswith('.'):
+        sys.exit('pipeline wt: NAME is one plain name (the worktree is %s/<NAME>)' % root)
+    wt = os.path.join(root, name)
+    if not os.path.isdir(wt):
+        ref = a[a.index('--from') + 1] if '--from' in a else (st.get('branch') or 'HEAD')
+        br = 'autopilot/' + name
+        if '--detach' in a:
+            args = ['--detach', wt, ref]
+        elif lib.git(M, 'rev-parse', '-q', '--verify', 'refs/heads/' + br).returncode == 0:
+            args = [wt, br]
+        else:
+            args = ['-b', br, wt, ref]
+        g = lib.git(M, 'worktree', 'add', '-q', *args)
+        if g.returncode:
+            sys.exit('pipeline wt: worktree add failed: %s' % (g.stderr or g.stdout).strip()[-300:])
+    print(wt)
+
+
 def cmd_start(t, a):
     st = lib.load_state(M)
     wt = a[a.index('--wt') + 1] if '--wt' in a else wt_of(st, t, {})
     if not os.path.isdir(wt):
-        sys.exit('pipeline start: no worktree %s (git worktree add -b autopilot/%s %s HEAD)' % (wt, t, wt))
+        sys.exit('pipeline start: no worktree %s (create it: pipeline wt %s)' % (wt, os.path.basename(wt)))
+    if not lib.in_worktrees_dir(M, wt, st):
+        sys.exit('pipeline start: worktree %s is outside %s: worktrees live next to the repo (create it: pipeline wt %s)'
+                 % (wt, lib.worktrees_dir(M), t))
     if not os.path.exists(ticket_file(t)):
         sys.exit('pipeline start: no ticket file %s' % ticket_file(t))
     done = set(st.get('done', []))
@@ -1220,6 +1267,8 @@ def main(a):
         cmd_job(a[1], int(a[2]), '--review-only' in a, '--final' in a)
     elif cmd == 'start' and len(a) >= 2:
         cmd_start(a[1], a[2:])
+    elif cmd == 'wt':
+        cmd_wt(a[1:])
     elif cmd == 'fix' and len(a) == 3:
         cmd_fix(a[1], a[2])
     elif cmd == 'retry' and len(a) == 2:

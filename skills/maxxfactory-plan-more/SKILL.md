@@ -52,7 +52,7 @@ The work comes from one of:
 ## 0. Context
 
 1. Find the repo (`.autopilot/state.json`); read `PLAN.md` (goal, KPIs, architecture, rules, pre-mortem, Decision log, existing milestone sections), `bin/milestone list` and the head of `bin/eta`.
-2. `bin/decision check`: pending decisions are synced first; a new milestone is not built on an unsynced plan.
+2. `bin/decision check`: pending decisions are synced first; a new milestone is not built on an unsynced plan. On macOS, `bin/spotlight check` (the folder that holds the repo and its `<repo>-wt`): exit 1 is handled as in `/maxxfactory-plan` section 0, before any model is started.
 3. Is `/maxxfactory-run` active on this project (inflight tickets in state, running `run-model` processes)? Then the run keeps going on the current milestones while you work: never pause it, never touch its worktrees. `bin/milestone add` writes state under the lock; the coordinator picks up the new queue at its next re-plan.
 
 ## 1. Intake gate (nothing planned without expectations)

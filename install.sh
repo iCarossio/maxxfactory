@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install.sh [--agents] [--import <models.json>]
-# Symlinks the nine skills into ~/.claude/skills (and ~/.agents/skills with --agents, for other harnesses that read
+# Symlinks the ten skills into ~/.claude/skills (and ~/.agents/skills with --agents, for other harnesses that read
 # the Agent Skills layout), then creates the user config ($AUTOPILOT_CONFIG_DIR, default ~/.config/maxxfactory)
 # from templates/models.json, or from an existing roster with --import.
 set -euo pipefail
@@ -11,7 +11,7 @@ for dir in "$HOME/.claude/skills" $([ "$AGENTS" = 1 ] && echo "$HOME/.agents/ski
   mkdir -p "$dir"
   # /maxxfactory-milestone became /maxxfactory-plan-more: drop the link of the old name (a link only, never a directory).
   if [ -L "$dir/maxxfactory-milestone" ]; then rm "$dir/maxxfactory-milestone"; echo "removed $dir/maxxfactory-milestone (renamed maxxfactory-plan-more)"; fi
-  for s in maxxfactory-init maxxfactory-plan maxxfactory-plan-more maxxfactory-run maxxfactory-usage maxxfactory-idea maxxfactory-continue maxxfactory-status maxxfactory-clean; do
+  for s in maxxfactory-init maxxfactory-plan maxxfactory-plan-more maxxfactory-run maxxfactory-usage maxxfactory-idea maxxfactory-continue maxxfactory-status maxxfactory-clean maxxfactory-update; do
     ln -sfn "$HERE/skills/$s" "$dir/$s"; echo "linked $dir/$s -> $HERE/skills/$s"
   done
 done

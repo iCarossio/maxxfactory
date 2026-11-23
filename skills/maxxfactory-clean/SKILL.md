@@ -13,7 +13,7 @@ Goal: at the end, `git status` is empty, `git worktree list` holds only the main
 
 ## Steps
 
-1. **Where.** `git rev-parse --show-toplevel`, current branch, default branch (`git symbolic-ref refs/remotes/origin/HEAD`, else `main`). Nearest `.autopilot/state.json` (or `$AUTOPILOT_REPO`): if found, this is an autopilot project; read `branch`, `worktrees_dir` (default `<repo>-wt`), `inflight`, `queue`, `done`. A rebase, merge or cherry-pick in progress in the main checkout: stop and report it, touch nothing.
+1. **Where.** `git rev-parse --show-toplevel`, current branch, default branch (`git symbolic-ref refs/remotes/origin/HEAD`, else `main`). Nearest `.autopilot/state.json` (or `$AUTOPILOT_REPO`): if found, this is an autopilot project; read `branch`, `inflight`, `queue`, `done`; its worktrees directory is `<repo>-wt`, next to the repo (`bin/pipeline wt` prints it; an older state.json may also name a `worktrees_dir` elsewhere, which `bin/gc` still collects). A rebase, merge or cherry-pick in progress in the main checkout: stop and report it, touch nothing.
 
 2. **What is in flight (autopilot projects only).** `bin/pipeline status` and `bin/bgrun ls`. Every ticket in `inflight` or `queue`, its worktree and its `autopilot/<ISSUE>` branch are work in progress: never commit in, rebase, or remove them. If `pipeline run` is alive, do not race it: skip step 4 for its worktrees and say so.
 

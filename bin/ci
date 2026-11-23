@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""ci: no CI run on the project branch until the work is ready to merge.
+
+A run pushes once per ticket. A workflow that starts on every push of the project branch or of its PR burns CI minutes
+on work that is not finished, and mails the owner at each failure. The rule: the PR of the project branch is a draft
+for the whole run, and no workflow run starts on its pushes; CI runs once, when the PR is marked ready to merge.
+
+  ci check    # exit 0: clean, or it cannot tell (push off, no `gh`, not GitHub); exit 1: one `CI: ...` line per finding
+
+Findings: the open PR of state.json `branch` is not a draft; a workflow run (push, pull_request) exists for the last
+pushed commit and was not skipped. On a finding: stop pushing (`state set push false`), then fix the cause in the
+project's CI, with the owner's agreement since it is their CI:
+  pull_request workflows   every job gets `if: github.event.pull_request.draft == false`, and the trigger lists
+                           `types: [opened, synchronize, reopened, ready_for_review]` so marking the PR ready starts CI
+  push workflows           `branches:` limited to the branches that deploy or release, or `branches-ignore: ['autopilot/**']`
+then `state set push true` and check again after the next push. At wrap-up, when the owner says the work is ready to
+merge: `state set pr_ready true`, `gh pr ready`; the rule is then off and CI runs. `pipeline run` runs this check with
+its hourly housekeeping and raises a CRITICAL alert on a finding. GitHub through `gh` only; another forge: apply the
+same rule by hand (draft MR, no pipeline on its pushes).
+"""
+import os, sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
+
+def main(a):
+    if a != ['check']:
+        print(__doc__); return 2
+    res = lib.ci_findings(lib.find_repo())
+    if res is None:
+        print('ci: cannot check (push off, PR marked ready, no gh, or not a GitHub repo)'); return 0
+    for l in res:
+        print(l)
+    if res:
+        print('Fix: bin/state set push false, then make the workflows skip a draft PR and the project branch (ci -h); '
+              'never leave it running.')
+        return 1
+    print('ci: clean (draft PR, no run on the last push)')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

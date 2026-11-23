@@ -3,16 +3,19 @@
 
 Agents create, rewrite and delete thousands of files an hour (worktrees, node_modules, builds, test output). In an
 indexed tree every write wakes `mds`/`mdworker`: the CPU and the disk stay busy all day, and the checks and reviews slow
-down and flake. Every project's repo and its worktrees directory must be excluded from Spotlight.
+down and flake. The folder that holds a project's repo and its `<repo>-wt` worktrees directory must be excluded.
 
   spotlight check [DIR...]   # exit 0: none indexed (or not macOS); exit 1: one `SPOTLIGHT: <dir> indexed (<n> items)` line each
   spotlight fix [DIR...]     # check, then open System Settings > Spotlight > Search Privacy and print what to add
 
-Without DIR: the project's repo (nearest .autopilot/state.json, $AUTOPILOT_REPO, else the git top level of the current
-directory) and its worktrees directory (state.json `worktrees_dir`, default `<repo>-wt`). An empty directory cannot be
-checked: exclude its parent. The simplest fix covers every project at once: add the folder that holds all your code
-(e.g. ~/Work) to Search Privacy. A folder whose name ends in `.noindex` is never indexed either. macOS gives no CLI for
-Search Privacy without root (`mdutil` works per volume, not per folder), so the owner adds it once by hand.
+Without DIR: the parent folder of the project's repo (nearest .autopilot/state.json, $AUTOPILOT_REPO, else the git top
+level of the current directory). Worktrees are always created in `<repo>-wt`, next to the repo, so that one folder
+covers the repo, its worktrees directory before it exists and after it was emptied, and every other project beside it.
+When the parent is the home directory or a volume root, the repo and its worktrees directory are checked instead (an
+empty directory cannot be checked): better, move the repo into a folder for code (e.g. ~/code) and exclude that folder.
+A `.noindex` suffix on a folder name is not a substitute: a worktrees directory named that way was still indexed
+(2026-11-22). macOS gives no CLI for Search Privacy without root (`mdutil` works per volume, not per folder), so the
+owner adds the folder once by hand.
 """
 import os, subprocess, sys
 
@@ -47,9 +50,8 @@ def main(a):
             print('spotlight: %s not indexed' % d)
     if not bad:
         return 0
-    common = os.path.commonpath([d for d, _ in bad])
-    print('Fix: System Settings > Spotlight > Search Privacy > "+", add %s (or the folder that holds all your code),'
-          ' then run `spotlight check` again.' % common)
+    print('Fix: System Settings > Spotlight > Search Privacy > "+", add %s, then run `spotlight check` again.'
+          % ' and '.join(d for d, _ in bad))
     if a[0] == 'fix' and sys.platform == 'darwin':
         subprocess.run(['open', PANE], stdin=subprocess.DEVNULL)
         print('spotlight: opened Search Privacy')

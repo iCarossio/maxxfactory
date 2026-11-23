@@ -5,7 +5,6 @@
   "branch": "autopilot/<project-slug>",
   "push": false,
   "trailer": "",
-  "worktrees_dir": "/abs/path/<repo>-wt",
   "checks": [],
   "context_files": ["AGENTS.md", "PLAN.md"],
   "coordinator": "<roster key of the model this coordinator session runs (Tier 1)>",

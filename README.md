@@ -25,6 +25,7 @@ Skills for Claude Code (or any harness that reads `~/.claude/skills`):
 | `/maxxfactory-status` | any time | every configured model, its subscription, the share of its 5-hour, weekly and monthly quota used, and when each resets |
 | `/maxxfactory-usage` | any time | tokens consumed, in total and per harness, today, over the last 7 days and the last 30 days |
 | `/maxxfactory-clean` | any time | commits what is worth keeping, deletes junk, removes orphan and finished worktrees and merged branches, reports the work in progress to resume with `/maxxfactory-continue` |
+| `/maxxfactory-update` | when the runtime itself must change | changes maxxfactory under fixed rules: the request restated as general rules, checked against the rules in place (a contradiction is your decision), enforced in code, tested, and recorded with nothing private in it |
 
 ## Methodology
 
@@ -52,7 +53,7 @@ The default tier table (`DEFAULT_TIER_TABLE` in `bin/autopilot_lib.py`, overrida
 |---|---|---|
 | 0 frontier | Claude Fable and Mythos, GPT-6 Astra, Gemini 4 Carbon | never automatic; only with `--allow-tier0` |
 | 1 flagship | Claude Opus, GPT-6.1 Sol, Gemini 4 Argon, GLM-5.3, Kimi K3, Qwen 3.8 Max, DeepSeek V4 Pro, Muse Spark | coordination, plan reviews, pre-mortems, milestone reviews; backup code reviewer |
-| 2 balanced | Claude Sonnet, GPT-6.1 Terra, Gemini 4 Hydrogen, Gemini 3.8 Flash, Grok 4.7 and 4.3, Mistral Large 4 ("Le Chonk", through Vibe), DeepSeek V4.1 Flash, Qwen 3.8 Flash and Plus, GLM-5.3 Flash (paid ids, e.g. OpenCode Go) | implement and review tickets (never the same model on one ticket) |
+| 2 balanced | Claude Sonnet, GPT-6.1 Terra, Gemini 4 Hydrogen, Gemini 3.8 Flash, Grok 4.7 and 4.3, Mistral Large 4 ("Le Chonk", through Vibe), DeepSeek V4.1 Flash, Qwen 3.8 Flash and Plus, GLM-5.3 Flash (paid ids, e.g. OpenCode Go), GLM-5.4 on a Z.ai coding plan (through opencode; about 50% more usage than 5.3 there) | implement and review tickets (never the same model on one ticket) |
 | 3 fast | Claude Haiku, GPT-6 Luna, Gemini Flash-Lite | implementation, only in a project pinned to it |
 | 4 small and free | the free models of opencode and OpenRouter: Poolside Laguna, NVIDIA Nemotron (Super, Ultra, Lightning, Nano), Xiaomi MiMo Flash, Google Gemma 4, Inkling, LongCat, Hy4 Flash, Flint, Ling, ERNIE Flash, Beam, the `-free` ids of DeepSeek and GLM, `openrouter/free`; every Mistral model but Large; Gemini older than 3.5 | trivial tasks only |
 
@@ -96,7 +97,9 @@ Google models run through Antigravity; the Gemini CLI adapter is shipped but unt
 - **Quota recovery.** `run-model usage --apply` cools down exhausted models until their exact reset; free Codex and Claude weekly resets are claimed automatically (`codex_auto_reset`, `claude_auto_reset`; never a paid option).
 - **One commit per ticket.** `bin/rebase-wt` brings a worktree onto the project branch head, `bin/finish` commits the ticket as one commit, cherry-picks it onto the project branch and removes the worktree.
 - **Only live worktrees.** The pipeline removes finished and never-started worktrees and their branches every hour (`bin/gc`), stops what still runs in them, and reports the ones that hold unmerged work instead of deleting them.
-- **Spotlight off.** `bin/spotlight check` (macOS): agents rewrite thousands of files an hour, and an indexed repo or worktrees directory keeps Spotlight busy all day. Init, run and resume check it; `bin/eta` warns while a tree is indexed.
+- **Worktrees next to the repo.** Every worktree is created in `<repo>-wt`, beside the repo (`bin/pipeline wt`), wherever the repo is now: the path is derived, never recorded, so a moved repo cannot send worktrees to a forgotten folder.
+- **CI once, at the end.** The project's PR is a draft for the whole run and no CI run starts on its pushes (one per ticket): the checks in the worktrees are the gate during the run, CI is the gate of the merge. `bin/ci check` and the pipeline alert when a workflow runs anyway.
+- **Spotlight off.** `bin/spotlight check` (macOS): agents rewrite thousands of files an hour, and an indexed tree keeps Spotlight busy all day. The folder that holds the repo and its `<repo>-wt` must be excluded: init, plan, plan-more, run and resume all check it; `bin/eta` warns while it is indexed.
 - **Housekeeping.** `bin/docker-up` / `bin/docker-reap` keep the Docker daemon up and remove dead containers; `bin/bgrun` runs long commands under a stall watchdog.
 - **Linear without MCP.** `bin/linear` is a minimal GraphQL client (`LINEAR_API_KEY`) for harnesses that have no Linear tools.
 - **Nothing personal in the repo.** Roster, accounts and cooldowns live in `~/.config/maxxfactory/`; project state in `<repo>/.autopilot/`.
@@ -128,7 +131,9 @@ The skills are the interface; they call the runtime in `bin/`, which you can als
 | `bin/tokens` | tokens consumed per harness and account, from the CLIs' local logs |
 | `bin/linear` | minimal Linear GraphQL client (`LINEAR_API_KEY`) for harnesses without Linear tools |
 | `bin/codex-reset`, `bin/claude-reset` | claim a free weekly usage reset on one account (never a paid option) |
-| `bin/spotlight` | checks that Spotlight does not index the trees agents write to (macOS) |
+| `bin/ci` | checks that the project's PR is a draft and that no CI run starts on its pushes before it is ready to merge |
+| `bin/spotlight` | checks that Spotlight does not index the folder that holds the repo and its worktrees (macOS) |
+| `bin/leak` | checks that a change to maxxfactory itself carries nothing private (`/maxxfactory-update`) |
 | `bin/docker-up`, `bin/docker-reap` | start the Docker daemon when it is stopped; remove dead containers |
 | `bin/bgrun` | runs a long command under a stall watchdog |
 | `tests/selftest.sh` | behavioural suite against a fake harness (no quota spent) |
@@ -144,7 +149,7 @@ cd maxxfactory && ./install.sh
 
 The links are absolute paths into this clone. **If you move or rename the clone, run `./install.sh` again**: the old links dangle and the skills (`/maxxfactory-continue` and the others) silently disappear from Claude Code.
 
-Then run `/maxxfactory-init`. Requires Python 3.9+, git, a Linear workspace, and the model CLIs you want to use, logged in. On macOS, exclude the folder that holds your code from Spotlight (System Settings > Spotlight > Search Privacy); `bin/spotlight check` verifies it.
+Then run `/maxxfactory-init`. Requires Python 3.9+, git, a Linear workspace, and the model CLIs you want to use, logged in. On macOS, keep your repos in one folder (not directly in your home directory) and exclude that folder from Spotlight (System Settings > Spotlight > Search Privacy); `bin/spotlight check` verifies it.
 
 Upgrading from `linear-autopilot`: run `./install.sh` again from the renamed clone (see above); an existing `~/.config/linear-autopilot/` keeps working until you rename it to `~/.config/maxxfactory/`.
 

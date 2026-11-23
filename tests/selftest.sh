@@ -4,7 +4,8 @@
 set -u
 H="$(cd "$(dirname "$0")/.." && pwd)"; export H
 SCR=$(mktemp -d -t autopilot-selftest); LPID=""; trap '[ -n "$LPID" ] && kill $LPID 2>/dev/null; rm -rf "$SCR"' EXIT
-export AUTOPILOT_CONFIG_DIR=$SCR/cfg3; mkdir -p "$SCR/fake"; export AUTOPILOT_LOGIN_CHECK=off  # never probe the real CLIs here
+export AUTOPILOT_CONFIG_DIR=$SCR/cfg3; mkdir -p "$SCR/fake"; export AUTOPILOT_LOGIN_CHECK=off AUTOPILOT_GH=off
+printf '#!/bin/sh\necho "${FAKE_MD_COUNT:-0}"\n' > $SCR/mdfind; chmod +x $SCR/mdfind; export AUTOPILOT_MDFIND=$SCR/mdfind  # never the real Spotlight index  # never probe the real CLIs here
 PASS=0; FAIL=0
 check() { if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "ok   $1"; else FAIL=$((FAIL+1)); echo "FAIL $1: got '$2' want '$3'"; fi; }
 cat > "$SCR/fake/fakecli" <<'EOF'
@@ -145,7 +146,7 @@ POOL=plan_review FAKE_BEHAVIOUR=approve $H/bin/review T-1 p1 "$RB" >/dev/null; c
 POOL=plan_review FAKE_BEHAVIOUR=approve $H/bin/review T-1 p2 "$RB" 2 >/dev/null 2>&1; check "plan review k=2 with one other Tier 1 vendor -> 2 (never another tier)" "$?" "2"
 POOL=plan_review ALLOW_MID=1 $H/bin/review T-1 p3 "$RB" >/dev/null 2>&1; check "plan review ALLOW_MID=1 refused" "$?" "1"
 $H/bin/alert ack all >/dev/null 2>&1
-printf '#!/bin/sh\necho "${FAKE_MD_COUNT:-0}"\n' > $SCR/mdfind; chmod +x $SCR/mdfind; mkdir -p $SCR/sp; touch $SCR/sp/f
+mkdir -p $SCR/sp; touch $SCR/sp/f
 check "spotlight: indexed tree -> SPOTLIGHT line, exit 1" "$(AUTOPILOT_MDFIND=$SCR/mdfind FAKE_MD_COUNT=7 $H/bin/spotlight check $SCR/sp | grep -c 'SPOTLIGHT: .*indexed (7 items)') $(AUTOPILOT_MDFIND=$SCR/mdfind FAKE_MD_COUNT=7 $H/bin/spotlight check $SCR/sp >/dev/null; echo $?)" "1 1"
 check "spotlight: excluded tree -> exit 0" "$(AUTOPILOT_MDFIND=$SCR/mdfind FAKE_MD_COUNT=0 $H/bin/spotlight check $SCR/sp >/dev/null; echo $?)" "0"
 check "credit: a usage reading scoped by window_groups does not weight other models of the account" "$(python3 -c "
@@ -181,6 +182,7 @@ check "a free model added with --level 2 is Tier 4: never a reviewer" "$(POOL re
 check "Tier 4 only in trivial" "$(POOL trivial) $(for p in implement fix review plan_review premortem milestone_review escalate; do POOL $p; done | grep -c fk-e)" '["fk-e"] 0'
 $H/bin/harness add-model fk-m --cli vibe --model mistral-x --level 2 >/dev/null
 check "a Mistral model is Tier 4 whatever its level" "$(POOL trivial | SORTED) $(POOL review | grep -c fk-m)" "['fk-e', 'fk-m'] 0"
+check "tier table: GLM 5.4 on a Z.ai coding plan is Tier 2; plain GLM elsewhere stays Tier 1, Flash Tier 2" "$(python3 -c "import sys;sys.path.insert(0,'$H/bin');import autopilot_lib as l;print(*[l.table_level({},x)[0] for x in ('zai-coding-plan/glm-5.4','zai-coding-plan/glm-5.3','opencode-go/glm-5.4','zai-coding-plan/glm-5.3-flash')])")" "2 1 1 2"
 check "Mistral Large is Tier 2 (tier table)" "$(python3 -c "import sys;sys.path.insert(0,'$H/bin');import autopilot_lib as l;print(l.table_level({},'mistral-large-4-0-3')[0], l.forced_four({'cli':'vibe','model':'mistral-large-4-0-3','vendor':'mistral'}), l.forced_four({'cli':'vibe','model':'mistral-medium-3.5','vendor':'mistral'}))")" "2 None Mistral model"
 $H/bin/harness add-model fk-z --cli claude --model claude-mythos-x --level 0 >/dev/null
 check "Tier 0 never in a pool" "$(for p in implement fix review plan_review premortem milestone_review escalate trivial coordinate; do POOL $p; done | grep -c fk-z)" "0"
@@ -1329,4 +1331,54 @@ PP2=$SCR/permit-proj2; mkdir -p $PP2/.autopilot $SCR/ccdir2; echo '{}' > $PP2/.a
  $H/bin/permit check >/dev/null; echo "global=$? local=$(test -e .claude/settings.local.json && echo yes || echo no)" > $SCR/permit2.out)
 check "permit apply: by default the rules go to the user settings (global on the machine), not the checkout" "$(cat $SCR/permit2.out) $(python3 -c "import json;print('Bash(gh workflow run publish.yml *)' in json.load(open('$SCR/ccdir2/settings.json'))['permissions']['allow'])")" "global=0 local=no True"
 check "access scan: JSON with the three inventories" "$(cd $PP && $H/bin/access scan --json | python3 -c "import json,sys;print(sorted(json.load(sys.stdin)))")" "['cli', 'env', 'mcp']"
+# ---------- worktrees live in <repo>-wt, next to the repo; Spotlight is checked on the folder that holds both ----------
+WR=$SCR/code/wtrepo; mkdir -p $WR/.autopilot $SCR/old-wt $SCR/else && cd $WR && git init -q -b main && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+RP() { python3 -c "import os,sys;print(os.path.realpath(sys.argv[1]))" "$1"; }
+printf '{"branch": "main", "worktrees_dir": "%s/old-wt", "inflight": {}, "queue": [], "done": ["L-1"]}\n' "$SCR" > .autopilot/state.json
+check "worktrees dir: <repo>-wt next to the repo, a worktrees_dir recorded in state.json is ignored" "$($H/bin/pipeline wt)" "$(RP $WR)-wt"
+check "pipeline wt NAME: created in <repo>-wt on autopilot/NAME, path printed" "$($H/bin/pipeline wt N-1) $(git -C $WR-wt/N-1 branch --show-current)" "$(RP $WR)-wt/N-1 autopilot/N-1"
+check "pipeline wt NAME --detach: a scratch checkout in <repo>-wt, no branch" "$($H/bin/pipeline wt suite-1 --detach) [$(git -C $WR-wt/suite-1 branch --show-current)]" "$(RP $WR)-wt/suite-1 []"
+check "pipeline wt: a path instead of a name is refused" "$($H/bin/pipeline wt ../x >/dev/null 2>&1; echo $?) $(test -e $SCR/code/x && echo made || echo none)" "1 none"
+git worktree add -q -b autopilot/N-2 $SCR/else/N-2 main; mkdir -p .autopilot/tickets; printf '# N-2\n\nDo it.\n' > .autopilot/tickets/N-2.md
+check "pipeline start --wt outside <repo>-wt is refused" "$($H/bin/pipeline start N-2 --wt $SCR/else/N-2 2>&1 | grep -c 'is outside .*worktrees live next to the repo')" "1"
+git worktree add -q -b autopilot/L-1 $SCR/old-wt/L-1 main; git worktree add -q -b autopilot/L-2 $SCR/old-wt/L-2 main; echo w > $SCR/old-wt/L-2/w.txt
+$H/bin/state set inflight.L-2 "{\"wt\": \"$SCR/old-wt/L-2\", \"round\": 1, \"stage\": \"hold\"}" >/dev/null
+$H/bin/gc >/dev/null 2>&1
+check "older state.json: gc still collects a done ticket in the recorded directory and keeps the one in flight there" "$(ls $SCR/old-wt | tr '\n' ' ')" "L-2 "
+check "finish finds an in-flight ticket's worktree where it was recorded" "$($H/bin/finish L-2 'feat: l2' body 2>&1 | grep -c '^COMMITTED') $(git show --stat --format= HEAD | grep -c w.txt)" "1 1"
+mkdir -p $SCR/old-wt/keep && touch $SCR/old-wt/keep/f
+check "spotlight check without DIR: the folder that holds the repo and <repo>-wt, plus the older recorded directory" "$(AUTOPILOT_MDFIND=$SCR/mdfind FAKE_MD_COUNT=3 $H/bin/spotlight check | grep '^SPOTLIGHT' | sed 's/ indexed.*//' | tr '\n' ' ')" "SPOTLIGHT: $(RP $SCR/code) SPOTLIGHT: $(RP $SCR/old-wt) "
+check "spotlight: a repo directly in the home directory checks the repo and its worktrees directory, never the home" "$(mkdir -p $SCR/home/r $SCR/home/r-wt; HOME=$SCR/home python3 -c "
+import sys; sys.path.insert(0,'$H/bin'); import autopilot_lib as l, os
+print(l.code_folder('$SCR/home/r'), [os.path.basename(d) for d in l.spotlight_dirs('$SCR/home/r')])")" "None ['r', 'r-wt']"
+check "state template: no worktrees_dir to fill in" "$(grep -c worktrees_dir $H/templates/state.json)" "0"
+check "finish runs to its first decision (its inline script parses at run time, which bash -n does not prove)" "$(WT=/nonexistent $H/bin/finish X-1 x y 2>&1 | grep -c 'worktree /nonexistent does not exist')" "1"
+# ---------- leak: nothing private in a change to the runtime ----------
+LR=$SCR/leakrepo; mkdir -p $LR && cd $LR && git init -q && echo ok > a.md && git add -A && git -c user.email=t@t -c user.name=t commit -qm init
+mkdir -p $SCR/leakcfg; LK() { AUTOPILOT_CONFIG_DIR=$SCR/leakcfg LEAK_REPO=$LR LEAK_USER=zzuser LEAK_USER_NAME="Zed Zedson" LEAK_USER_EMAIL=zed@example.com $H/bin/leak "$@"; }
+check "leak: a generic change is clean (placeholders, test addresses)" "$(printf 'Worktrees go to ~/code/<repo>-wt/ENG-12, see /Users/<name>/x, mail a@example.com, UTF-8.\n' >> a.md; LK check | tail -1 | tr '\n' ' '; LK check >/dev/null; echo $?)" "leak: clean 0"
+printf 'path /%s/someone/work/x\nticket ABC-123 and mail bob@%s\nby Zedson on zzuser\n' Users corp.io > new.md; echo 'AcmeCorp' > $SCR/leakcfg/private-terms.txt; echo 'seen at acmecorp' >> a.md  # the path and address are assembled here so this file itself stays clean
+OUT=$(LK check); RC=$?
+check "leak: home path, tracker id, e-mail, identity and private term in the pending change -> exit 1, one line each" "$RC $(echo "$OUT" | grep -c '^LEAK') $(echo "$OUT" | grep -o ': [a-z]* "' | sort -u | tr -d ':" \n')" "1 6 emailidentitypathtermticket"
+echo 'see ticket XYZ-9' > $SCR/msg.txt; check "leak --msg: a commit message draft is read too" "$(LK check --msg $SCR/msg.txt | grep -c 'msg.txt:1: ticket "XYZ-9"')" "1"
+check "leak --all: the runtime's own files carry nothing private" "$(AUTOPILOT_CONFIG_DIR=$SCR/cfg3 $H/bin/leak check --all | tail -1)" "leak: clean"
+check "every skill directory is installed by install.sh" "$(for d in $H/skills/*/; do grep -q "$(basename $d)" $H/install.sh || echo missing $(basename $d); done)" ""
+# ---------- ci: the project's PR is a draft and nothing runs on its pushes ----------
+CR=$SCR/cirepo; mkdir -p $CR/.autopilot && cd $CR && git init -q -b main && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+SHA=$(git rev-parse HEAD); git update-ref refs/remotes/origin/main $SHA; echo '{"branch": "main", "push": true}' > .autopilot/state.json
+cat > $SCR/fake/fakegh <<EOF
+#!/bin/sh
+if [ "\$1" = pr ]; then echo "[{\"number\": 7, \"isDraft\": \${FAKE_DRAFT:-true}, \"url\": \"u\"}]"; exit 0; fi
+echo "[{\"workflowName\": \"CI\", \"event\": \"pull_request\", \"conclusion\": \"\${FAKE_CONCL:-skipped}\", \"status\": \"completed\", \"headSha\": \"$SHA\", \"url\": \"r\"}, {\"workflowName\": \"CI\", \"event\": \"pull_request\", \"conclusion\": \"failure\", \"status\": \"completed\", \"headSha\": \"old\", \"url\": \"r0\"}]"
+EOF
+chmod +x $SCR/fake/fakegh
+check "ci: draft PR, the run of the last push was skipped (an older failed run does not count) -> clean" "$(AUTOPILOT_GH=$SCR/fake/fakegh $H/bin/ci check | tail -1 | cut -c1-9); $?" "ci: clean; 0"
+OUT=$(AUTOPILOT_GH=$SCR/fake/fakegh FAKE_CONCL=failure $H/bin/ci check); check "ci: a workflow ran on the last push of the draft branch -> exit 1" "$? $(echo "$OUT" | grep -c '^CI: workflow "CI" ran on the last push of main (pull_request, failure)')" "1 1"
+OUT=$(AUTOPILOT_GH=$SCR/fake/fakegh FAKE_DRAFT=false $H/bin/ci check); check "ci: a PR that is not a draft -> exit 1" "$? $(echo "$OUT" | grep -c '^CI: PR #7 of main is not a draft')" "1 1"
+$H/bin/state set pr_ready true >/dev/null; check "ci: once the owner marked the work ready (pr_ready) CI is meant to run" "$(AUTOPILOT_GH=$SCR/fake/fakegh FAKE_CONCL=failure FAKE_DRAFT=false $H/bin/ci check >/dev/null; echo $?)" "0"
+$H/bin/state set pr_ready false >/dev/null; $H/bin/state set pipeline '{"gc_minutes": 1}' >/dev/null
+AUTOPILOT_GH=$SCR/fake/fakegh FAKE_CONCL=failure $H/bin/pipeline run --once >/dev/null 2>&1
+check "pipeline housekeeping raises a CRITICAL alert when CI ran on the draft branch" "$($H/bin/alert list | grep -c 'CI runs on pushes of the project branch')" "1"
+rm -f .autopilot/pipeline/gc.stamp; AUTOPILOT_GH=$SCR/fake/fakegh $H/bin/pipeline run --once >/dev/null 2>&1
+check "the alert resolves once the last push started nothing" "$($H/bin/alert list --json | python3 -c "import json,sys;print([bool(a.get('resolved_at')) for a in json.load(sys.stdin) if a['kind']=='ci'])")" "[True]"
 echo "=== $PASS passed, $FAIL failed"

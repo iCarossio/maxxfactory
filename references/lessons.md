@@ -190,22 +190,35 @@ What the runtime does now: `pipeline run` runs the worktree garbage collection e
 - Two full suites at once on 16 cores (load 37-41) fail browser and container tests that pass alone. Keep `max_full_jobs` at 1 on one machine, and rerun the failing tests alone before sending an approved ticket back.
 - Test runs rewrite tracked screenshots of other tickets and add `.next-dev-smoke` entries to `web/tsconfig.json`: restore them before a merge.
 
-## QA run killed by the coordinator's own PLAN.md edits (2026-11-21, escape.tech)
+## QA run killed by the coordinator's own PLAN.md edits (2026-11-21)
 Symptom: a 4-hour full QA ended with 9 suites "report missing"; the log shows "Dirty site refused". Cause: the QA read the site from the coordinator checkout, and `bin/decision add` rewrote PLAN.md there mid-run; the QA refuses a dirty site. Rule: long QA runs read a detached worktree frozen at a commit (`git worktree add --detach <wt>/qa HEAD`), never the checkout where the coordinator writes PLAN.md, decisions or notes.
 
-## A run that looked alive and was waiting for nothing (2026-11-22, escape.tech)
+## A run that looked alive and was waiting for nothing (2026-11-22)
 Symptom: the owner asks "are we done?" and gets a long status with a table; hours later nothing has moved and the ETA is still two hours away. Three causes, each fixed in the runtime:
 - The coordinator resumed through `/maxxfactory-continue`, which told it to read the run rulebook as a file. A compaction dropped it: no bars, no tick, no heartbeat from then on. Rule: the rulebook is loaded by invoking the `maxxfactory-run` skill, and invoked again after every compaction.
 - The last ticket was held by the coordinator (stage `hold`), so the pipeline had nothing to approve and `wait-approval` could never return; the two tickets behind it needed the owner (a DNS switch), which no file recorded. Rule: `owner_wait` in state.json names every ticket that waits on the owner; `wait-approval` ends on DONE, WAITING ON OWNER, STUCK, and every 10 minutes.
 - The held ticket had no `est`, so its ETA was "now + 141 min" at every reading. Rule: `bin/eta` prints the `RUN:` verdict first, shows a date only while the run moves, marks a date that rests on an unestimated held ticket as a guess, and leaves owner work out of it.
 
-## Parity suites read a dist/ the site tests were rebuilding (2026-11-22, escape.tech)
+## Parity suites read a dist/ the site tests were rebuilding (2026-11-22)
 Symptom: a final QA run had landing visual captures fail with `net::ERR_HTTP_RESPONSE_CODE_FAILURE` on pages that exist; dist/*.html timestamps were newer than the build step. Cause: the site's `npm test` ran in the background in the same worktree and rebuilt dist/ while parity:visual served it. Also: running the parity suites by hand without `PARITY_BASE=http://localhost:$SERVE_PORT` made them hit whatever listened on the default port 4321 (the test suite's server). Rule: run site tests in their own detached worktree, never beside parity suites on the same dist; always export PARITY_BASE with SERVE_PORT, as the QA runner does.
 
-## A night lost to a login, a permission and two manual steps (2026-11-22, escape.tech)
+## A night lost to a login, a permission and two manual steps (2026-11-22)
 Symptom: the coordinator's Claude login ended in the middle of the night; after the resume, the run waited until morning on `gh workflow run publish.yml`, which the permission system refused, and on a DNS switch planned as an owner click although a Cloudflare tool was connected.
 Causes: nothing read the login's end date (`claude auth status` reports it); the permission template forbade pre-allowing a publish, so the one outward action of the plan needed a human; the plan listed manual steps without first checking what a CLI, an MCP tool or an API could do.
 Rules:
 - `bin/harness logins` before a run and on every resume; a login that ends before the run does is renewed first. The pipeline alerts 12 hours ahead.
 - Every outward action is a row of the plan's `Pre-authorized actions`, approved once and pre-allowed with `bin/permit`; the owner types `! bin/permit apply` (an agent cannot write its own settings).
 - `bin/access scan` before any prerequisite is asked: ask for access, not for clicks.
+
+## New worktrees appear in a folder nobody chose; Spotlight indexes hundreds of thousands of files there (2026-11-22)
+Symptom: `bin/eta` shows `SPOTLIGHT: <a folder outside the code folder> indexed (400000 items)` although the folder that holds the repo is excluded; `git worktree list` shows every ticket worktree under the home directory, named after a directory the repo no longer has. Cause: state.json recorded `worktrees_dir` as an absolute path at setup; the repo was later moved and renamed, the path stayed, and every new worktree went to the old place. The folder had been given a `.noindex` suffix, which did not stop the indexing.
+What the runtime does now: the worktrees directory is always `<repo>-wt`, next to the repo, derived from where the repo is (`lib.worktrees_dir`); a `worktrees_dir` in an older state.json is ignored for new worktrees, its in-flight tickets finish where they are and `bin/gc` still collects them. `bin/pipeline wt <name>` is the one way to create a worktree by hand, and `pipeline start` refuses one outside the directory. `bin/spotlight check` checks the parent folder of the repo (one exclusion covers the repo, its worktrees and their neighbours) and is a step of init, plan, plan-more, run and continue.
+Moving worktrees that are in flight: stop the pipeline and every process running in them first, move the directory, `git worktree repair <each path>`, rewrite the `wt` of each `inflight` entry with `bin/state`, then start the pipeline again.
+
+## The runtime's own repo carried the name of the project a lesson came from (2026-11-22)
+Symptom: lesson headings named a project. Cause: nothing checked what an update of the runtime writes. Rule: the runtime is changed only through `/maxxfactory-update` (general rules, conflict check with the rules in place, the owner decides contradictions), and `bin/leak check` refuses identities, home paths, e-mails, tracker identifiers and the owner's private terms in the pending change.
+
+## A failure mail from CI after every merged ticket; CI minutes spent on a draft PR (2026-11-22)
+Symptom: the owner receives "CI: All jobs have failed" mails every few minutes during a run; `gh run list` shows one `pull_request` run per push of the project branch, each several minutes long, on a PR that is a draft. Cause: the PR was opened as a draft as the rule says, but a draft PR still triggers `pull_request` workflows on every push, and the run pushes once per ticket; nothing read the workflows before the first push.
+What the runtime does now: the workflows are read at planning and before the first push, and one that would run on the project branch or a draft PR is changed first, with the owner's agreement (jobs carry `if: github.event.pull_request.draft == false` and the trigger lists `ready_for_review`; push triggers name the branches that deploy). `bin/ci check` (setup, heartbeat, resume, and the pipeline's hourly housekeeping, which raises a CRITICAL alert) finds a PR that is not a draft or a run that started on the last push; the answer is `push` false until it is fixed. CI runs once, when the PR is marked ready to merge (`pr_ready`).
+
