@@ -546,7 +546,10 @@ def final_path(t, r):
 def approve(t, r, st=None, expect='review'):
     """Review approved. Two-level checks: the full suite first (stage `final`), then approved."""
     st = st or lib.load_state(M)
-    if expect == 'review' and fast_checks_of(st, t) is not None:
+    # `pipeline.skip_final` (owner opt-in): merge on the reviewed fast checks; the coordinator runs the full suite
+    # once on the project branch per batch of merges instead of once per ticket.
+    skip_final = bool((st.get('pipeline') or {}).get('skip_final'))
+    if expect == 'review' and fast_checks_of(st, t) is not None and not skip_final:
         if os.path.exists(final_path(t, r)):
             os.remove(final_path(t, r))
         if transition(t, 'review', r, stage='final', tries=0):
