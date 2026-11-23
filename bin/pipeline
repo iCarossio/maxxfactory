@@ -51,8 +51,9 @@ Any other stage (plan, hold, ...) is left alone. triage and stuck tickets are li
 Fix rounds go through `run-model run implement --role fix` with the brief <ISSUE>-impl-<n>.md, so run-model's
 automatic escalation after round 3 applies. Every fix brief ends with the rule that the full checks must pass.
 `pipeline start` refuses a ticket whose state.json `blockers` are not all in `done` (`--force` overrides).
-`auto_start` starts queued tickets by itself: blockers merged, `Touches` line of the ticket file not overlapping a
-ticket in flight (shared test and docs paths excepted), up to `target_inflight` (0: 2 x max_jobs).
+`auto_start` starts queued tickets by itself: blockers merged, `Touches` line of the ticket file overlapping neither
+the `Touches` nor the really changed files of a ticket in flight (shared test and docs paths excepted; `Touches` is not
+a fence for the implementer, each round logs `outside Touches: ...`), up to `target_inflight` (0: 2 x max_jobs).
 Settings: state.json `pipeline` {interval 60, max_jobs 3, max_rounds 5, max_rounds_hard 8, max_merges 3,
 review_retries 3, impl_retries 3, retry_minutes 10, check_timeout_minutes 60, check_silence_minutes 25, max_full_jobs 2,
 auto_merge false, auto_start false, target_inflight 0, setup "", merge_prefix "feat"}. With the worktree garbage
@@ -328,6 +329,24 @@ def touches_of(t):
         return set()
     return {p.strip().rstrip('/') for p in re.findall(r'`([^`]+)`', mt.group(1))
             if p.strip() and not SHARED.search(p.strip()) and ' ' not in p.strip()}
+
+
+def changed_files(wt, branch):
+    """Files the worktree changed against the project branch (committed, uncommitted and untracked), without the
+    shared test and docs paths. Since 2026-11-23 `Touches` is not a fence (an implementer edits every file its
+    acceptance needs), so what a ticket in flight really changed counts with its `Touches` when tickets are kept apart."""
+    if not os.path.isdir(wt):
+        return set()
+    base = lib.git(wt, 'merge-base', branch, 'HEAD').stdout.strip() or 'HEAD'
+    names = lib.git(wt, 'diff', '--name-only', base).stdout.splitlines()
+    names += lib.git(wt, 'ls-files', '-o', '--exclude-standard').stdout.splitlines()
+    return {p.strip() for p in names if p.strip() and not SHARED.search(p.strip())}
+
+
+def outside_touches(t, wt, branch):
+    """Changed files of the ticket that its `Touches` line does not cover ([] when the ticket has no `Touches`)."""
+    tt = touches_of(t)
+    return sorted(f for f in changed_files(wt, branch) if not overlaps({f}, tt)) if tt else []
 
 
 def overlaps(a, b):
@@ -719,6 +738,9 @@ def on_run(t, v, st, c):
                 log('%s r%s: empty diff twice -> coordinator' % (t, r))
             return
     if res.get('status') == 'ok':
+        out = outside_touches(t, wt, st['branch']) if stage == 'implement' else []
+        if out:
+            log('%s r%s: outside Touches: %s' % (t, r, ', '.join(out[:12]) + (' (+%d)' % (len(out) - 12) if len(out) > 12 else '')))
         if transition(t, stage, r, stage='rebase', tries=0, empty_retry=None):
             log('%s r%s: %s ok (%s, Tier %s)' % (t, r, name, res.get('model'), res.get('level')))
             v = dict(v, stage='rebase')
@@ -861,8 +883,8 @@ def auto_merge(st, c):
 
 
 def auto_start(st, c):
-    """`auto_start`: queued tickets whose blockers are all merged (state.json `done`) and whose `Touches` do not
-    overlap a ticket in flight start by themselves, in queue order, up to `target_inflight`. The worktree is created
+    """`auto_start`: queued tickets whose blockers are all merged (state.json `done`) and whose `Touches` overlap
+    neither the `Touches` nor the really changed files of a ticket in flight start by themselves, in queue order, up to `target_inflight`. The worktree is created
     from the project branch; `setup` runs in it before round 1, in the background."""
     inf = st.get('inflight', {})
     target = int(c['target_inflight'] or 2 * int(c['max_jobs']))
@@ -873,7 +895,7 @@ def auto_start(st, c):
     owner = lib.owner_waits(st)  # a ticket that waits on the owner never starts by itself
     busy = set()
     for t in inf:
-        busy |= touches_of(t)
+        busy |= touches_of(t) | changed_files(wt_of(st, t, inf[t]), st['branch'])
     for t in st.get('queue', []):
         if room <= 0:
             break

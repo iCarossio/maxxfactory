@@ -1255,6 +1255,11 @@ $H/bin/state set queue '["Q-6", "Q-7", "Q-8", "Q-9", "Q-5"]' >/dev/null; $H/bin/
 $H/bin/state set pipeline.setup '"touch SETUP_RAN"' >/dev/null; $H/bin/state set pipeline.target_inflight $((NIN + 2)) >/dev/null
 $H/bin/state set pipeline.auto_start true >/dev/null; TICK
 check "auto_start: queue order, blocked and overlapping Touches skipped, setup ran, up to target_inflight" "$(ST Q-6) $(test -f $SCR/prepo-wt/Q-6/SETUP_RAN && echo setup) $(ST Q-7) $(ST Q-8) $(ST Q-9) $(ST Q-5)" "1 implement setup gone gone 1 implement gone"
+check "a round that changed files outside Touches goes on, and the pipeline logs them" "$(grep -c 'Q-3 r1: outside Touches: .*work-Q-3.txt' $PR/.autopilot/pipeline/pipeline.log)" "1"
+check "implementer brief: Touches is not a fence, blocked only for what is forbidden by name" "$(grep -c 'not a fence' $PR/.autopilot/briefs/Q-3-impl-1.md) $(grep -c '^OUTSIDE:' $PR/.autopilot/briefs/Q-3-impl-1.md) $(grep -c 'cannot be done inside its' $H/prompts/implement.md)" "1 1 0"
+echo x > $SCR/prepo-wt/Q-9/shared-util.ts; QT Q-11 shared-util.ts; QT Q-12 src/Q-12.ts
+$H/bin/state set queue '["Q-11", "Q-12"]' >/dev/null; $H/bin/state set pipeline.target_inflight $((NIN + 3)) >/dev/null; TICK
+check "auto_start: a file an in-flight ticket changed outside its Touches keeps a queued ticket on that file waiting" "$(ST Q-11) $(ST Q-12)" "gone 1 implement"
 $H/bin/state set pipeline.auto_start false >/dev/null; $H/bin/state set pipeline.auto_merge false >/dev/null
 unset AUTOPILOT_REPO PIPELINE_SYNC PIPELINE_RUN_MODEL PIPELINE_REVIEW
 check "opencode adapter disables the websearch tool (headless runs cannot answer its prompt)" "$(python3 -c "import json;e=json.load(open('$H/harnesses/opencode.json'))['run']['env'];print(json.loads(e['OPENCODE_CONFIG_CONTENT'])['tools']['websearch'])")" "False"
