@@ -16,9 +16,9 @@ An idea is not work: no pre-mortem, no review, not in `queue`, `stages` or `mile
   idea promote ENG-1[,ENG-2...] --into <existing-milestone-id> --id <batch-id> [--name "<label>"] [--force]
                                          the ideas become tickets of a milestone that exists: no KPI, no plan to fill
                                          writes the `bin/milestone add` spec skeleton
-                                         .autopilot/plan/milestones/<id>/spec.json (where /maxxfactory-plan-more keeps it)
+                                         .maxxfactory/plan/milestones/<id>/spec.json (where /maxxfactory-plan-more keeps it)
 
-add, in order, each step checkpointed in .autopilot/ideas/created.json (a rerun with the same title resumes and never
+add, in order, each step checkpointed in .maxxfactory/ideas/created.json (a rerun with the same title resumes and never
 creates a second issue):
   1. the Ideas milestone (a projectMilestone named "Ideas (unscheduled)", or IDEAS_MILESTONE; no target date) and the
      team label `idea` exist: found by name, else created;
@@ -131,10 +131,10 @@ def mark_promoted(text, identifier, note):
 
 
 class Ckpt:
-    """.autopilot/ideas/created.json: {"milestone": {...}, "label_id", "ideas": {slug: {...}}, "adopt": {...}}."""
+    """.maxxfactory/ideas/created.json: {"milestone": {...}, "label_id", "ideas": {slug: {...}}, "adopt": {...}}."""
 
     def __init__(self, repo):
-        self.path = os.path.join(repo, '.autopilot', 'ideas', 'created.json')
+        self.path = lib.pdir(repo, 'ideas', 'created.json')
         self.d = lib.read_json(self.path) if os.path.exists(self.path) else {}
         for k in ('milestone', 'ideas', 'adopt'): self.d.setdefault(k, {})
 
@@ -329,7 +329,7 @@ def cmd_promote(a):
     unknown = [t for t in issues if t not in ideas]
     if not issues or unknown: die(f'{unknown or "no issues"}: not ideas of this project (bin/idea list)')
     if not re.match(r'^[a-z0-9][a-z0-9-]*$', a.id): die(f'--id {a.id!r} must be a lowercase slug')
-    out = os.path.join(repo, '.autopilot', 'plan', 'milestones', a.id, 'spec.json')
+    out = lib.pdir(repo, 'plan', 'milestones', a.id, 'spec.json')
     if os.path.exists(out) and not a.force: die(f'{out} exists (the planner may have edited it): --force to overwrite')
     lin = linear(repo)
     tickets, quotes = [], []

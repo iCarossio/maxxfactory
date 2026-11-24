@@ -2,7 +2,7 @@
   "project": "<Linear project name>",
   "project_id": "<Linear project id>",
   "team": "<Linear team key>",
-  "branch": "autopilot/<project-slug>",
+  "branch": "maxxfactory/<project-slug>",
   "push": false,
   "trailer": "",
   "checks": [],

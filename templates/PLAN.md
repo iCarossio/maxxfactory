@@ -18,7 +18,7 @@ Each KPI is measurable at the deadline with the command or number in the "How me
 
 Anything a user sees must look polished and modern, on par with the references below, not merely work. A reference the owner names or shows is a success criterion.
 
-| Reference (image under .autopilot/plan/refs/) | What to match | Applies to |
+| Reference (image under .maxxfactory/plan/refs/) | What to match | Applies to |
 |---|---|---|
 | <ref-tables.png> | <density, one-line rows, severity pills> | <tables tickets> |
 
@@ -74,7 +74,7 @@ concern). A milestone added later goes through `bin/milestone add`, which append
 | api | ... | L | scaffold | `npm test` | PM-1 |
 
 ## Pre-mortem: most probable failure reasons and their guardrails
-<Filled from .autopilot/plan/premortem.md after the adversarial review. Every reason kept has a guardrail with a home: a KPI, a check, a ticket, or a rule in this plan.>
+<Filled from .maxxfactory/plan/premortem.md after the adversarial review. Every reason kept has a guardrail with a home: a KPI, a check, a ticket, or a rule in this plan.>
 
 | # | Failure reason | P | Impact | Guardrail | Where it lives |
 |---|---|---|---|---|---|

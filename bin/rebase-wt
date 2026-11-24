@@ -23,7 +23,7 @@ trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 # The first entry of `git worktree list` is the main checkout, which sits on the project branch.
 # Prefer the project branch recorded in state.json (main checkout = parent of the common git dir): the project may
 # live in a secondary worktree.
-STATE_BRANCH=$(r=${AUTOPILOT_REPO:-}; [ -z "$r" ] && r=$(dirname "$(cd "$GITDIR" && pwd)"); [ -f "$r/.autopilot/state.json" ] && python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('branch',''))" "$r/.autopilot/state.json" 2>/dev/null || true)
+STATE_BRANCH=$(r=${AUTOPILOT_REPO:-}; [ -z "$r" ] && r=$(dirname "$(cd "$GITDIR" && pwd)"); f="$r/.maxxfactory/state.json"; [ -f "$f" ] || f="$r/.autopilot/state.json"; [ -f "$f" ] && python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('branch',''))" "$f" 2>/dev/null || true)
 BRANCH=${2:-${STATE_BRANCH:-$(git worktree list --porcelain | awk '/^branch /{print $2; exit}' | sed 's#refs/heads/##')}}
 TAG="rebase-wt-$(basename "$W")-$$-$(date +%s)"
 unmerged() { git diff --name-only --diff-filter=U; }

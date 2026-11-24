@@ -12,7 +12,7 @@ The ETA is a schedule, not a throughput extrapolation:
   takes size x (measured minutes per size unit), where the measurement uses the tickets committed in the
   last 8 active hours (gaps over 1 h count as 1 h) times the average parallelism `parallel`.
 - Re-plan signals (printed as `REPLAN:` lines after the ETA line): a slip of more than 30 min against
-  the reading 1-3 h ago (kept in `.autopilot/eta-history.jsonl`), two or more single-item stages in a
+  the reading 1-3 h ago (kept in `.maxxfactory/eta-history.jsonl`), two or more single-item stages in a
   row, and fewer in-flight tickets than `parallel_target` (default 6) while work is queued, unless the
   load average is over 2x the core count: then it says to shed load instead.
 - Update `est` whenever a round starts or ends (a review that sends a ticket back adds a round, ~30-40
@@ -274,14 +274,14 @@ def find_repo():
         return os.environ['AUTOPILOT_REPO']
     d = os.getcwd()
     while d != '/':
-        if os.path.exists(os.path.join(d, '.autopilot', 'state.json')):
+        if os.path.exists(lib.pdir(d, 'state.json')):
             return d
         d = os.path.dirname(d)
-    sys.exit('eta: no .autopilot/state.json found (set AUTOPILOT_REPO)')
+    sys.exit('eta: no .maxxfactory/state.json found (set AUTOPILOT_REPO)')
 
 
 M = find_repo()
-S = json.load(open(os.environ.get('ETA_STATE') or os.path.join(M, '.autopilot', 'state.json')))
+S = json.load(open(os.environ.get('ETA_STATE') or lib.pdir(M, 'state.json')))
 S_REAL = S  # the state on disk: the RUN verdict never reads a what-if schedule
 WITH_PROPOSALS = False  # a what-if reading: no slip signal, no history (the approved plan is the reference)
 # Proposed milestones (drafted with `bin/milestone add`, not yet approved) show as their own bars, tagged, on a what-if
@@ -409,7 +409,7 @@ end = (now + dt.timedelta(minutes=total_end)).astimezone()
 
 # Re-plan signals. They print after the ETA line, so `bin/eta | head -1` hides them: run it in full.
 replan = []
-hist_path = os.path.join(M, '.autopilot', 'eta-history.jsonl')
+hist_path = lib.pdir(M, 'eta-history.jsonl')
 hist = []
 try:
     hist = [json.loads(l) for l in open(hist_path) if l.strip()]

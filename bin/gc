@@ -4,10 +4,10 @@
   gc [--dry-run]
 
 Looks only at the project's worktrees directory (`<repo>-wt`, next to the repo; plus the directory an older state.json
-recorded as `worktrees_dir`, until it is empty) and at `autopilot/*` branches. Never touches a worktree that is in flight, queued or locked.
-  removed  the ticket is in `done` (work still in it is saved first as .autopilot/gc/<ISSUE>-<time>.patch), or the
+recorded as `worktrees_dir`, until it is empty) and at ticket branches (`maxxfactory/*`, `autopilot/*`). Never touches a worktree that is in flight, queued or locked.
+  removed  the ticket is in `done` (work still in it is saved first as .maxxfactory/gc/<ISSUE>-<time>.patch), or the
            worktree has no change and no commit of its own for 24 h; processes running in it are stopped first
-  branch   an `autopilot/*` branch without a worktree whose ticket is done, or that holds no commit of its own
+  branch   a ticket branch (`maxxfactory/*`, `autopilot/*`) without a worktree whose ticket is done, or that holds no commit of its own
   orphan   not in flight but holds work: never removed, reported so the coordinator merges it, puts it back in flight
            or removes it by hand
 `pipeline run` does this by itself every `pipeline.gc_minutes` (60; 0 turns it off). Exit 0; exit 1 when an orphan is left.

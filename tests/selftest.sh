@@ -1358,7 +1358,7 @@ WR=$SCR/code/wtrepo; mkdir -p $WR/.autopilot $SCR/old-wt $SCR/else && cd $WR && 
 RP() { python3 -c "import os,sys;print(os.path.realpath(sys.argv[1]))" "$1"; }
 printf '{"branch": "main", "worktrees_dir": "%s/old-wt", "inflight": {}, "queue": [], "done": ["L-1"]}\n' "$SCR" > .autopilot/state.json
 check "worktrees dir: <repo>-wt next to the repo, a worktrees_dir recorded in state.json is ignored" "$($H/bin/pipeline wt)" "$(RP $WR)-wt"
-check "pipeline wt NAME: created in <repo>-wt on autopilot/NAME, path printed" "$($H/bin/pipeline wt N-1) $(git -C $WR-wt/N-1 branch --show-current)" "$(RP $WR)-wt/N-1 autopilot/N-1"
+check "pipeline wt NAME: created in <repo>-wt on maxxfactory/NAME, path printed" "$($H/bin/pipeline wt N-1) $(git -C $WR-wt/N-1 branch --show-current)" "$(RP $WR)-wt/N-1 maxxfactory/N-1"
 check "pipeline wt NAME --detach: a scratch checkout in <repo>-wt, no branch" "$($H/bin/pipeline wt suite-1 --detach) [$(git -C $WR-wt/suite-1 branch --show-current)]" "$(RP $WR)-wt/suite-1 []"
 check "pipeline wt: a path instead of a name is refused" "$($H/bin/pipeline wt ../x >/dev/null 2>&1; echo $?) $(test -e $SCR/code/x && echo made || echo none)" "1 none"
 git worktree add -q -b autopilot/N-2 $SCR/else/N-2 main; mkdir -p .autopilot/tickets; printf '# N-2\n\nDo it.\n' > .autopilot/tickets/N-2.md
@@ -1375,6 +1375,24 @@ import sys; sys.path.insert(0,'$H/bin'); import autopilot_lib as l, os
 print(l.code_folder('$SCR/home/r'), [os.path.basename(d) for d in l.spotlight_dirs('$SCR/home/r')])")" "None ['r', 'r-wt']"
 check "state template: no worktrees_dir to fill in" "$(grep -c worktrees_dir $H/templates/state.json)" "0"
 check "finish runs to its first decision (its inline script parses at run time, which bash -n does not prove)" "$(WT=/nonexistent $H/bin/finish X-1 x y 2>&1 | grep -c 'worktree /nonexistent does not exist')" "1"
+# ---------- project directory .maxxfactory/ and ticket branches maxxfactory/<NAME> (2026-11-23); an older .autopilot/ and autopilot/<NAME> keep working ----------
+MX=$SCR/code/mxrepo; mkdir -p $MX/.autopilot && cd $MX && git init -q -b main && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+echo '{"branch": "main", "inflight": {}, "queue": [], "done": []}' > .autopilot/state.json
+check "older project: state read and written in .autopilot/ in place, no .maxxfactory/ created" "$($H/bin/state set push false >/dev/null; python3 -c "import json;print(json.load(open('.autopilot/state.json'))['push'])") $(test -e .maxxfactory && echo new || echo none)" "False none"
+git branch autopilot/O-1 main
+check "an existing autopilot/<NAME> branch is reused for its worktree" "$($H/bin/pipeline wt O-1 >/dev/null; git -C $MX-wt/O-1 branch --show-current)" "autopilot/O-1"
+git branch maxxfactory/O-2 main; git branch autopilot/O-3 main; git -c user.email=t@t -c user.name=t commit -q --allow-empty -m two
+$H/bin/gc >/dev/null 2>&1
+check "gc removes ticket branches without work under both prefixes" "$(git for-each-ref --format='%(refname:short)' refs/heads/maxxfactory refs/heads/autopilot | tr '\n' ' ')" "autopilot/O-1 "
+mkdir -p .autopilot/pipeline; python3 -c "import fcntl,time;f=open('.autopilot/pipeline/run.lock','a+');fcntl.flock(f,fcntl.LOCK_EX);open('.autopilot/pipeline/locked','w');time.sleep(30)" & MXL=$!
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -e .autopilot/pipeline/locked ] && break; python3 -c "import time;time.sleep(0.2)"; done
+check "state migrate is refused while the pipeline runs" "$($H/bin/state migrate 2>&1 | grep -c 'the pipeline runs') $($H/bin/state migrate >/dev/null 2>&1; echo $?) $(test -d .autopilot -a ! -L .autopilot && echo kept)" "1 1 kept"
+kill $MXL 2>/dev/null; wait $MXL 2>/dev/null
+check "state migrate: moved to .maxxfactory/, .autopilot left as a link, both ignored, state still read" "$($H/bin/state migrate | grep -c moved) $(test -L .autopilot && echo link) $($H/bin/state get push) $(git status --porcelain | wc -l | tr -d ' ') $($H/bin/state migrate | grep -c 'nothing to migrate')" "1 link false 0 1"
+FX=$SCR/code/fresh; mkdir -p $FX
+check "a new project lives in .maxxfactory/" "$(python3 -c "import sys;sys.path.insert(0,'$H/bin');import autopilot_lib as l;print(l.pdir('$FX','state.json'))")" "$FX/.maxxfactory/state.json"
+check "the project directory is reserved for implementers, old and new name" "$(grep -c "maxxfactory|autopilot|git" $H/bin/pipeline)" "1"
+cd $SCR
 # ---------- leak: nothing private in a change to the runtime ----------
 LR=$SCR/leakrepo; mkdir -p $LR && cd $LR && git init -q && echo ok > a.md && git add -A && git -c user.email=t@t -c user.name=t commit -qm init
 mkdir -p $SCR/leakcfg; LK() { AUTOPILOT_CONFIG_DIR=$SCR/leakcfg LEAK_REPO=$LR LEAK_USER=zzuser LEAK_USER_NAME="Zed Zedson" LEAK_USER_EMAIL=zed@example.com $H/bin/leak "$@"; }

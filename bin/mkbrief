@@ -3,7 +3,7 @@
 
 Fills prompts/implement.md, prompts/review.md, prompts/plan-review.md (adversarial review of the ticket file itself) or
 prompts/diagnose.md (read-only root-cause diagnosis of one scope, `SCOPE=` env text) for one ticket.
-- Repo and state: the nearest `.autopilot/state.json` above the current directory (or $AUTOPILOT_REPO).
+- Repo and state: the nearest `.maxxfactory/state.json` above the current directory (or $AUTOPILOT_REPO).
 - Working directory of the ticket: $WT (a worktree) or the repo itself.
 - ticket.md: first line `# Title`, then the body. A line `CHECKS: <cmd>` sets the checks (else state.json `checks`);
   `CHECKS_FAST: <cmd>` (else state.json `checks_fast`) is what implementers run each round (two-level checks).
@@ -33,7 +33,7 @@ kind, iss, n, tf = sys.argv[1:5]
 findings = open(sys.argv[5]).read() if len(sys.argv) > 5 else '(none)'
 M = find_repo()
 R = os.environ.get('WT', M)
-S = json.load(open(os.path.join(M, '.autopilot', 'state.json')))
+S = json.load(open(lib.pdir(M, 'state.json')))
 T = open(tf).read()
 title = T.splitlines()[0].lstrip('# ').strip()
 body = '\n'.join(T.splitlines()[1:])
@@ -57,7 +57,7 @@ rep = {'ISSUE_ID': iss, 'ISSUE_TITLE': title, 'CWD': R, 'BRANCH': S['branch'], '
        'ISSUE_BODY': body, 'ACCEPTANCE': acc, 'FINDINGS': findings, 'CHECKS': checks, 'BASE': base, 'ROUND': str(n), 'TICKET_PATH': os.path.abspath(tf), 'SCOPE': os.environ.get('SCOPE', '(whole ticket)')}
 for k, v in rep.items():
     tpl = tpl.replace('{{' + k + '}}', v)
-os.makedirs(os.path.join(M, '.autopilot', 'briefs'), exist_ok=True)
-out = os.path.join(M, '.autopilot', 'briefs', f'{iss}-{kind}-{n}.md' if kind != 'diag' else f'{iss}-diag-{os.environ.get("SCOPE_ID", n)}.md')
+os.makedirs(lib.pdir(M, 'briefs'), exist_ok=True)
+out = lib.pdir(M, 'briefs', f'{iss}-{kind}-{n}.md' if kind != 'diag' else f'{iss}-diag-{os.environ.get("SCOPE_ID", n)}.md')
 open(out, 'w').write(tpl)
 print(out)

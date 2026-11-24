@@ -9,7 +9,7 @@ description: /maxxfactory-plan for a project that already exists. Plans more wor
 
 This is `/maxxfactory-plan` for a project that already exists: the same planning care and the same approval, scoped to what is added and fitted into the plan that is already running.
 
-You are the **planner**. A project exists: `PLAN.md` at the repo root, `.autopilot/state.json`, a Linear project, maybe tickets in flight under `/maxxfactory-run`. You add work to it. The user is present: ask what you need, show your work, and create nothing in Linear before the user approves.
+You are the **planner**. A project exists: `PLAN.md` at the repo root, `.maxxfactory/state.json`, a Linear project, maybe tickets in flight under `/maxxfactory-run`. You add work to it. The user is present: ask what you need, show your work, and create nothing in Linear before the user approves.
 
 ## Which shape
 
@@ -46,12 +46,12 @@ The work comes from one of:
   bin/idea promote ENG-40,ENG-41 --id <milestone-slug> --name "<milestone name>"
   ```
   **(into)** `bin/idea promote ENG-40 --into <milestone id> --id <batch-slug>` instead: the same skeleton with `"into"`, without KPIs and plan to fill.
-  It writes the skeleton `.autopilot/plan/milestones/<id>/spec.json`: the owner's words of every idea quoted in `description`, one placeholder ticket per idea (`from_idea`), KPIs, plan and ticket instructions marked `TODO`, and `from_ideas`. If a skeleton already exists for that id (an earlier, interrupted session), continue from it; `--force` only when the user wants to start over.
-- **A skeleton or spec already on disk** (`.autopilot/plan/milestones/<id>/spec.json`): continue from it; `status.json` next to it says which steps of `bin/milestone add` already ran.
+  It writes the skeleton `.maxxfactory/plan/milestones/<id>/spec.json`: the owner's words of every idea quoted in `description`, one placeholder ticket per idea (`from_idea`), KPIs, plan and ticket instructions marked `TODO`, and `from_ideas`. If a skeleton already exists for that id (an earlier, interrupted session), continue from it; `--force` only when the user wants to start over.
+- **A skeleton or spec already on disk** (`.maxxfactory/plan/milestones/<id>/spec.json`): continue from it; `status.json` next to it says which steps of `bin/milestone add` already ran.
 
 ## 0. Context
 
-1. Find the repo (`.autopilot/state.json`); read `PLAN.md` (goal, KPIs, architecture, rules, pre-mortem, Decision log, existing milestone sections), `bin/milestone list` and the head of `bin/eta`.
+1. Find the repo (`.maxxfactory/state.json`); read `PLAN.md` (goal, KPIs, architecture, rules, pre-mortem, Decision log, existing milestone sections), `bin/milestone list` and the head of `bin/eta`.
 2. `bin/decision check`: pending decisions are synced first; a new milestone is not built on an unsynced plan. On macOS, `bin/spotlight check` (the folder that holds the repo and its `<repo>-wt`): exit 1 is handled as in `/maxxfactory-plan` section 0, before any model is started.
 3. Is `/maxxfactory-run` active on this project (inflight tickets in state, running `run-model` processes)? Then the run keeps going on the current milestones while you work: never pause it, never touch its worktrees. `bin/milestone add` writes state under the lock; the coordinator picks up the new queue at its next re-plan.
 
@@ -65,15 +65,15 @@ Show the project's `Model tiers per phase` table from `PLAN.md` with the pools o
 1. **What exists when the milestone is done**, for whom, why now, and what is out of scope.
 2. **Milestone KPIs**: each with a target and a measurement (command, query, count, date). Push back on vague ones; if the user cannot name one, propose three and let them pick. No measurable KPI: stop here.
 3. **Ordering**: must it wait for a current milestone, run beside it, or preempt it? A deadline?
-4. **Design bar** (any milestone with a UI): the references the owner names or shows, saved under `.autopilot/plan/milestones/<id>/refs/`, and the look criteria, exactly as in `/maxxfactory-plan` step 0 item 5. A reference the owner gives is a success criterion: the milestone gets a design KPI (screenshots side by side with the references, owner sign-off) and every UI ticket gets look criteria and screenshot acceptance. Functional KPIs never stand in for it.
+4. **Design bar** (any milestone with a UI): the references the owner names or shows, saved under `.maxxfactory/plan/milestones/<id>/refs/`, and the look criteria, exactly as in `/maxxfactory-plan` step 0 item 5. A reference the owner gives is a success criterion: the milestone gets a design KPI (screenshots side by side with the references, owner sign-off) and every UI ticket gets look criteria and screenshot acceptance. Functional KPIs never stand in for it.
 
 Keep the user's answers verbatim: they are the `user:"..."` source of the approval decision. A promoted idea whose answers turn it into something else than its words (narrowed, split, merged with another) is fine: say so in `why`, the idea's words stay quoted in `description`.
 
 ## 2. Draft the spec (you, Tier 1)
 
-Read the code the milestone touches before writing (conventions, existing checks, the notes of the tickets it builds on, `docs/notes/*`). Then write `.autopilot/plan/milestones/<id>/spec.json` (format: `bin/milestone --help`):
+Read the code the milestone touches before writing (conventions, existing checks, the notes of the tickets it builds on, `docs/notes/*`). Then write `.maxxfactory/plan/milestones/<id>/spec.json` (format: `bin/milestone --help`):
 - `id`, `name`, `description`, `why`, `kpis` (ids `<id>-K1`, ...).
-- **(into)** `"into": "<existing milestone id>"`, and `id` is a new slug for this batch (`core-qa-2`, `auth-followups`; never the id of a milestone), `name` a short label for it ("QA pass 2"). No `kpis` (only a KPI this batch adds to the milestone, rare) and no `plan` unless the tickets need a rule of their own. The directory is still `.autopilot/plan/milestones/<id>/`.
+- **(into)** `"into": "<existing milestone id>"`, and `id` is a new slug for this batch (`core-qa-2`, `auth-followups`; never the id of a milestone), `name` a short label for it ("QA pass 2"). No `kpis` (only a KPI this batch adds to the milestone, rare) and no `plan` unless the tickets need a rule of their own. The directory is still `.maxxfactory/plan/milestones/<id>/`.
 - `plan`: markdown with the goal, the architecture decisions (with rejected alternatives), the rules and guardrails of this milestone, and a `Pre-mortem` table filled in step 4.
 - `tickets`: as in `/maxxfactory-plan` step 6: precise instructions for a cheap implementer, `CHECKS:` line, `**Acceptance**`, guardrails, what not to touch, and `touches` (the files or modules it changes). One ticket is one commit. **Atomic tickets (enforced).** Splitting the work is a goal of planning, not a detail. Every ticket is one concern of at most about 400 changed lines, estimate S or M (never L: split it), and declares `touches`: the files or modules it changes (max 8). Two tickets that can run in parallel never change the same file outside a shared test or docs path (a directory named tests, test, __tests__ or docs at any depth, or a file named *.test.*, *.spec.*, test_*.py or *_test.py): give each hot file (an API router, the runtime, a shared store) one owner per stage, and chain the others with `blocked_by`. Prefer vertical slices that each ship a working, checked piece over a big ticket and a cleanup ticket. `bin/linear import` and `bin/milestone add` refuse a ticket list that breaks these rules, and the plan review checks them. Why: on 2026-11-12 an L ticket (22 files, +2051/-638 lines) took 18 rounds: each new reviewer found new bugs in the big diff, and parallel tickets editing the same files forced 5 merge rounds. Tickets of this milestone that change a file a ticket in flight also changes are blocked by that ticket. Include the unglamorous ones: integration with the existing milestones, real-data fixtures, docs merge, final QA against the milestone KPIs. **Fan-out: contract first, then one reference (enforced by the plan review).** When three or more tickets apply the same pattern (convert N pages, add N connectors, port N endpoints), the plan has, before them: (1) a contract ticket that lands every shared type, prop and component signature the N tickets need, so none of them has to touch a shared file; (2) one reference ticket, implemented at Tier 1 (`inflight.<ISSUE>.pool` or a `Tier 1` note), that converts the first instance end to end (code, tests, screenshots, notes) and that every other ticket of the fan-out is blocked by and names as the pattern to copy. A ticket that would need a shared file changed stops with `STATUS: blocked` (the pipeline hands it to the coordinator at once). **No shared ledger files.** A docs or test-helper file that every ticket of a fan-out edits (an inventory, a registry, a list of headings) is generated from the code or split into one file per ticket. Why: on 2026-11-20 ten parallel page conversions each hit the same missing prop, invented their own, and spent 1 to 3 extra review rounds each on it; every one of them also edited the same shared inventory file, which produced merge rounds and a red project branch.
 - **Checks in two levels.** Give each ticket a `CHECKS_FAST:` line (or the project a state.json `checks_fast`): typecheck, lint and the tests of what it touches, a few minutes. The full suite (`CHECKS:`) runs once, after the review approves.
@@ -92,10 +92,10 @@ From this first `--dry-run` on, the milestone is **proposed**: `bin/eta` and `bi
 
 ```
 bin/run-model usage --apply
-bin/bgrun --name milestone-<id> --idle 1800 --timeout 5400 --watch .autopilot/plan/milestones/<id> -- bin/milestone add <spec> --planner <your roster key>
+bin/bgrun --name milestone-<id> --idle 1800 --timeout 5400 --watch .maxxfactory/plan/milestones/<id> -- bin/milestone add <spec> --planner <your roster key>
 ```
 in the background (10-40 min; a few minutes for tickets added to a milestone), while you re-read the spec. It runs:
-- **(new milestone only)** a **pre-mortem** of the milestone by a Tier 1 model of another vendor (the milestone's adversarial review), two passes (the reasons, then an adversarial self-review against the repo), with the existing plan as context, so it raises how this milestone fails and how it breaks what is already planned; into `.autopilot/plan/milestones/<id>/premortem.md`;
+- **(new milestone only)** a **pre-mortem** of the milestone by a Tier 1 model of another vendor (the milestone's adversarial review), two passes (the reasons, then an adversarial self-review against the repo), with the existing plan as context, so it raises how this milestone fails and how it breaks what is already planned; into `.maxxfactory/plan/milestones/<id>/premortem.md`;
 - a **plan review** by a Tier 1 model of another vendor (`POOL=plan_review`): fit with the existing architecture, tickets and KPIs, real and complete dependencies, measurable KPIs; into `.../plan-review.md`. **(into)** The reviewer is told the tickets inherit the milestone's KPIs and guardrails, and checks that they serve it without widening it, that their dependencies on existing tickets are real, and that each is atomic. The pre-mortem is skipped by the runtime and the reason is logged in the decision.
 
 Exit 3 is the expected stop (needs approval). Exit 2: a review gave nothing usable; wait for a reset (`bin/run-model wait premortem`), and tell the user when it lasts. Neither your own vendor nor a Tier 2 model is ever a substitute (the old `--allow-mid` is gone). `--review-k 2` adds a second plan reviewer of a distinct vendor only when the user asks.
@@ -143,6 +143,6 @@ Tell the user in a few lines: the shape you took, the Linear milestone link, the
 
 - You plan; you never implement. Reading the repo is allowed, editing code is not.
 - Reviewers are read-only and never of your own vendor or model (`--planner` excludes them).
-- Keep every reviewer's full output on disk under `.autopilot/plan/milestones/<id>/` and never paraphrase a reason into something weaker.
+- Keep every reviewer's full output on disk under `.maxxfactory/plan/milestones/<id>/` and never paraphrase a reason into something weaker.
 - No decision unsourced: the milestone itself, every change it forces on the existing plan, and every skipped step have a Decision log row synced to Linear.
 - Budget: one pre-mortem (two passes) and one plan review per new milestone, one plan review per batch of added tickets, plus one rerun after a material fold. Never pay for extra credits: wait for a reset.

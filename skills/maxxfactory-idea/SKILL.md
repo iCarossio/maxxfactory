@@ -9,7 +9,7 @@ description: Capture the owner's quick product ideas in a Linear project without
 
 An idea is not work. Capture it immediately, exactly as the owner said it, and get out of the way: no planning questions, no KPIs, no pre-mortem, no review, no estimate, no queue, no ETA. Planning happens only when the owner promotes ideas into a milestone.
 
-`bin/<x>` below means the `bin` directory next to this SKILL.md (`~/.claude/skills/maxxfactory-idea/bin/<x>` after `install.sh`). The project is found through the nearest `.autopilot/state.json` (or `$AUTOPILOT_REPO`); it needs `project_id` and `team` (a project created by `/maxxfactory-plan` or set up by `/maxxfactory-run`) and a `PLAN.md`.
+`bin/<x>` below means the `bin` directory next to this SKILL.md (`~/.claude/skills/maxxfactory-idea/bin/<x>` after `install.sh`). The project is found through the nearest `.maxxfactory/state.json` (or `$AUTOPILOT_REPO`); it needs `project_id` and `team` (a project created by `/maxxfactory-plan` or set up by `/maxxfactory-run`) and a `PLAN.md`.
 
 | Script | Role |
 |---|---|
@@ -39,7 +39,7 @@ A rerun with the same title prints `already captured` and creates nothing. A fai
 
 - `bin/idea list [--json]`: identifier, state, title, related ideas, read from Linear.
 - `bin/idea adopt ENG-1,ENG-2 --source user:"<words>"`: for ideas collected before this skill existed (an `idea` label, no milestone): moves them into the Ideas milestone, adds the label, sets Backlog, adds their backlog rows, logs one decision. Refuses scheduled work (a ticket of a milestone, queued, in flight or done).
-- **Promote** (the owner schedules one or several ideas): run `/maxxfactory-plan-more ENG-1,ENG-2` (or name the ideas). That skill decides with the owner whether the ideas are a new milestone or tickets of one that exists, then calls `bin/idea promote ENG-1[,ENG-2] --id <slug> --name "<milestone name>"` (or `--into <milestone id> --id <batch slug>`: no KPI and no plan to fill, no pre-mortem), which writes the spec skeleton `.autopilot/plan/milestones/<id>/spec.json` (the ideas quoted, one placeholder ticket per idea with `from_idea`, KPIs, plan and ticket instructions marked TODO, `from_ideas`), then runs its intake gate (measurable KPIs), pre-mortem, plan review and the owner's approval. The real add refuses a spec that still has a TODO. On approval each promoted idea gets a comment, a duplicate relation to its new tickets, the Duplicate (else Canceled) state, a struck-through backlog row, and leaves `ideas.issues`. Never promote and plan inside this skill.
+- **Promote** (the owner schedules one or several ideas): run `/maxxfactory-plan-more ENG-1,ENG-2` (or name the ideas). That skill decides with the owner whether the ideas are a new milestone or tickets of one that exists, then calls `bin/idea promote ENG-1[,ENG-2] --id <slug> --name "<milestone name>"` (or `--into <milestone id> --id <batch slug>`: no KPI and no plan to fill, no pre-mortem), which writes the spec skeleton `.maxxfactory/plan/milestones/<id>/spec.json` (the ideas quoted, one placeholder ticket per idea with `from_idea`, KPIs, plan and ticket instructions marked TODO, `from_ideas`), then runs its intake gate (measurable KPIs), pre-mortem, plan review and the owner's approval. The real add refuses a spec that still has a TODO. On approval each promoted idea gets a comment, a duplicate relation to its new tickets, the Duplicate (else Canceled) state, a struck-through backlog row, and leaves `ideas.issues`. Never promote and plan inside this skill.
 
 ## Rules
 

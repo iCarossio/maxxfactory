@@ -2,7 +2,7 @@
 config transactions, tree snapshots and verdict validation are enforced in exactly one place.
 
 Config: $AUTOPILOT_CONFIG_DIR (default ~/.config/maxxfactory): models.json (roster, accounts, pools, health),
-harnesses/ (adapter overrides), prompts/ (template overrides). Per project: <repo>/.autopilot/state.json.
+harnesses/ (adapter overrides), prompts/ (template overrides). Per project: <repo>/.maxxfactory/state.json (`.autopilot/` before 2026-11-23).
 Python 3.9+ (no match statements, no nested same-quote f-strings).
 """
 import contextlib, datetime as dt, fcntl, fnmatch, glob, hashlib, json, os, re, shutil, signal, subprocess, sys, tarfile, tempfile, time
@@ -19,7 +19,13 @@ SEVERITIES = ('blocker', 'major', 'minor')
 BLOCKING = ('blocker', 'major')
 IMPACTS = ('fatal', 'severe', 'moderate')
 COSTS = ('high', 'mid', 'cheap', 'free')
-IGNORE_PREFIXES = ('.autopilot/', '.tmp/')
+# Project directory and ticket-branch prefix (2026-11-23: renamed from `.autopilot/` and `autopilot/`). Projects
+# started before keep their `.autopilot/` until `bin/state migrate` moves it (never in the middle of a run), and
+# ticket branches created before keep their `autopilot/<NAME>` name until they are merged and removed.
+PROJECT_DIR, LEGACY_PROJECT_DIR = '.maxxfactory', '.autopilot'
+BRANCH_PREFIX, LEGACY_BRANCH_PREFIXES = 'maxxfactory/', ('autopilot/',)
+TICKET_BRANCH_PREFIXES = (BRANCH_PREFIX,) + LEGACY_BRANCH_PREFIXES
+IGNORE_PREFIXES = (PROJECT_DIR + '/', LEGACY_PROJECT_DIR + '/', '.tmp/')
 
 
 def now():
@@ -88,8 +94,63 @@ def update_reg(fn):
         return out
 
 
+def pdir(repo, *parts):
+    """The project's working directory `<repo>/.maxxfactory` (joined with `parts`). A project started before the rename
+    keeps its `<repo>/.autopilot` (read and written in place) until `bin/state migrate` moves it."""
+    new, old = os.path.join(repo, PROJECT_DIR), os.path.join(repo, LEGACY_PROJECT_DIR)
+    if not os.path.exists(os.path.join(new, 'state.json')) and os.path.isdir(old) and not os.path.islink(old):
+        return os.path.join(old, *parts)
+    return os.path.join(new, *parts)
+
+
+def ticket_branch(repo, name):
+    """The branch of a ticket worktree: the `autopilot/<NAME>` branch an older version created when it exists (its work
+    stays where it is), else `maxxfactory/<NAME>`."""
+    for pre in LEGACY_BRANCH_PREFIXES:
+        if git(repo, 'rev-parse', '-q', '--verify', 'refs/heads/' + pre + name).returncode == 0:
+            return pre + name
+    return BRANCH_PREFIX + name
+
+
+def ensure_ignored(repo):
+    """`.maxxfactory/` and the legacy `.autopilot` (directory or the link `bin/state migrate` leaves) in
+    `.git/info/exclude`, so neither ever shows up as an untracked tree."""
+    p = subprocess.run(['git', '-C', repo, 'rev-parse', '--git-common-dir'], capture_output=True, text=True)
+    git_dir = (p.stdout or '').strip()
+    if p.returncode != 0 or not git_dir:
+        return
+    excl = os.path.join(git_dir if os.path.isabs(git_dir) else os.path.join(repo, git_dir), 'info', 'exclude')
+    os.makedirs(os.path.dirname(excl), exist_ok=True)
+    prev = open(excl).read() if os.path.exists(excl) else ''
+    lines = prev.splitlines()
+    add = [x for x in (PROJECT_DIR + '/', LEGACY_PROJECT_DIR) if x not in lines]
+    if add:
+        open(excl, 'w').write(prev + ('\n' if prev and not prev.endswith('\n') else '') + ''.join(x + '\n' for x in add))
+
+
+def migrate_project_dir(repo):
+    """Moves a legacy `<repo>/.autopilot` to `<repo>/.maxxfactory` and leaves `.autopilot` as a link to it, so paths
+    recorded before (briefs, logs, a coordinator's notes) still resolve. Refused while the pipeline lock is held or a
+    background job runs: a run is never moved under its feet. Returns a one-line message."""
+    new, old = os.path.join(repo, PROJECT_DIR), os.path.join(repo, LEGACY_PROJECT_DIR)
+    if os.path.islink(old) or not os.path.isdir(old):
+        ensure_ignored(repo)
+        return 'nothing to migrate: %s is the project directory' % pdir(repo)
+    if os.path.exists(new):
+        raise SystemExit('state migrate: both %s and %s exist: merge them by hand, then rerun' % (old, new))
+    if clock_alive(repo):
+        raise SystemExit('state migrate: the pipeline runs: stop it first (pipeline stop), then rerun')
+    busy = live_bg_jobs(repo)
+    if busy:
+        raise SystemExit('state migrate: background job(s) running: %s: wait for them, then rerun' % ', '.join(busy))
+    os.rename(old, new)
+    os.symlink(PROJECT_DIR, old)
+    ensure_ignored(repo)
+    return 'moved %s -> %s (%s left as a link)' % (old, new, LEGACY_PROJECT_DIR)
+
+
 def state_path(repo):
-    return os.path.join(repo, '.autopilot', 'state.json')
+    return pdir(repo, 'state.json')
 
 
 def load_state(repo):
@@ -186,7 +247,7 @@ def find_repo(required=True, start=None):
             return d
         d = os.path.dirname(d)
     if required:
-        sys.exit('no .autopilot/state.json found above the current directory (set AUTOPILOT_REPO)')
+        sys.exit('no .maxxfactory/state.json found above the current directory (set AUTOPILOT_REPO)')
     return None
 
 
@@ -333,12 +394,12 @@ def last_ok(r, keys):
 
 # ---------- critical alerts (the coordinator must tell the owner; see bin/alert) ----------
 # One JSON object per line: id, level, kind (vendor_out | pool_blocked), key (vendor or pool), at, message, details,
-# acked_at, resolved_at. Written to <repo>/.autopilot/alerts.jsonl, or to $AUTOPILOT_CONFIG_DIR/alerts.jsonl when the
+# acked_at, resolved_at. Written to <repo>/.maxxfactory/alerts.jsonl, or to $AUTOPILOT_CONFIG_DIR/alerts.jsonl when the
 # writer runs outside a project. An alert stays listed until it is acknowledged, even once resolved, so an outage that
 # ended while the owner was away is still reported.
 
 def alerts_path(repo):
-    return os.path.join(repo, '.autopilot', 'alerts.jsonl') if repo else os.path.join(CONFIG_DIR, 'alerts.jsonl')
+    return pdir(repo, 'alerts.jsonl') if repo else os.path.join(CONFIG_DIR, 'alerts.jsonl')
 
 
 def read_alerts(path):
@@ -1085,13 +1146,13 @@ def _overlap(a, b):
 def ticket_touches(repo):
     """{issue identifier: [touched paths]} for the project's tickets.
 
-    Read from each milestone spec (`.autopilot/plan/milestones/*/spec.json`, slugs mapped to identifiers by the
+    Read from each milestone spec (`.maxxfactory/plan/milestones/*/spec.json`, slugs mapped to identifiers by the
     `tickets.created.json` next to it), then overridden by the `Touches ...:` line of the ticket file
-    (`.autopilot/tickets/<ISSUE>.md`), which a coordinator decision may have changed since the plan. Tickets with
+    (`.maxxfactory/tickets/<ISSUE>.md`), which a coordinator decision may have changed since the plan. Tickets with
     neither are absent: callers must not treat a missing entry as "touches nothing".
     """
     out = {}
-    for spec in glob.glob(os.path.join(repo, '.autopilot', 'plan', 'milestones', '*', 'spec.json')):
+    for spec in glob.glob(pdir(repo, 'plan', 'milestones', '*', 'spec.json')):
         try:
             tickets = json.load(open(spec)).get('tickets') or []
             created = json.load(open(os.path.join(os.path.dirname(spec), 'tickets.created.json'))).get('tickets') or {}
@@ -1101,7 +1162,7 @@ def ticket_touches(repo):
             ident = (created.get(t.get('slug')) or {}).get('identifier')
             if ident and isinstance(t.get('touches'), list):
                 out[ident] = [str(x) for x in t['touches'] if str(x).strip()]
-    for f in glob.glob(os.path.join(repo, '.autopilot', 'tickets', '*.md')):
+    for f in glob.glob(pdir(repo, 'tickets', '*.md')):
         try:
             m = re.search(r'^Touches[^:\n]*:\s*(.+)$', open(f).read(), re.M)
         except OSError:
@@ -1303,9 +1364,9 @@ def gc_worktrees(repo, dry=False, now=None):
     """Removes the worktrees no ticket needs any more, so agents, checks, the indexer and the disk only see the ones
     in flight. Only worktrees under the project's worktrees directory (`<repo>-wt`, and the directory an older
     state.json recorded) are looked at; one that is in flight, queued or locked is never touched. Removed: a worktree whose ticket is in `done` (work found in it is saved first as a patch
-    in .autopilot/gc/), and one with no change and no commit of its own for GC_EMPTY_HOURS. A worktree that is not in
+    in .maxxfactory/gc/), and one with no change and no commit of its own for GC_EMPTY_HOURS. A worktree that is not in
     flight but holds work is never removed: it is reported as an orphan for the coordinator to merge or drop.
-    `autopilot/*` branches left without a worktree go too when their ticket is done or they hold no commit.
+    Ticket branches (`maxxfactory/*`, `autopilot/*`) left without a worktree go too when their ticket is done or they hold no commit.
     Returns [(action, path or branch, detail)] with action in removed, branch, orphan, pruned."""
     st = load_state(repo)
     now = now or time.time()
@@ -1362,7 +1423,7 @@ def gc_worktrees(repo, dry=False, now=None):
             mb = git(wt, 'merge-base', base, 'HEAD').stdout.strip() or 'HEAD'
             patch = subprocess.run(['git', '-C', wt, 'diff', '--cached', '--binary', mb], capture_output=True).stdout
             if patch:
-                d = os.path.join(repo, '.autopilot', 'gc'); os.makedirs(d, exist_ok=True)
+                d = pdir(repo, 'gc'); os.makedirs(d, exist_ok=True)
                 f = os.path.join(d, '%s-%s.patch' % (t, time.strftime('%Y%m%d-%H%M%S', time.localtime(now))))
                 with open(f, 'wb') as fh:
                     fh.write(patch)
@@ -1372,10 +1433,11 @@ def gc_worktrees(repo, dry=False, now=None):
         if g.returncode != 0:
             out.append(('orphan', wt, 'could not be removed: %s' % (g.stderr or g.stdout).strip()[-200:])); continue
         out.append(('removed', wt, why))
-        if br.startswith('autopilot/'):
+        if br.startswith(TICKET_BRANCH_PREFIXES):
             git(repo, 'branch', '-q', '-D', br); used.discard(br)
             out.append(('branch', br, 'worktree removed'))
-    for br in git(repo, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/autopilot/').stdout.split():
+    for br in git(repo, 'for-each-ref', '--format=%(refname:short)',
+                  *('refs/heads/' + x for x in TICKET_BRANCH_PREFIXES)).stdout.split():
         t = br.split('/', 1)[1]
         if br in used or t in keep_ids:
             continue
@@ -1399,7 +1461,7 @@ RUN_STATES = ('RUNNING', 'DONE', 'STUCK', 'WAITING ON OWNER', 'STOPPED')
 
 def clock_alive(repo):
     """True while a `pipeline run` holds this project's lock."""
-    p = os.path.join(repo, '.autopilot', 'pipeline', 'run.lock')
+    p = pdir(repo, 'pipeline', 'run.lock')
     if not os.path.exists(p):
         return False
     try:
@@ -1416,7 +1478,7 @@ def clock_alive(repo):
 
 def live_bg_jobs(repo):
     """Names of the bgrun jobs of this project that still run (the clock itself excluded)."""
-    d, out = os.path.join(repo, '.autopilot', 'jobs'), []
+    d, out = pdir(repo, 'jobs'), []
     for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
         try:
             j = read_json(os.path.join(d, name))
@@ -1511,7 +1573,7 @@ def run_state(repo, st=None, procs=None):
     blockers = st.get('blockers') or {}
     ready = [t for t in queue if t not in owner and all(b in done for b in blockers.get(t, []))]
     for t in ready:
-        tf = os.path.join(repo, '.autopilot', 'tickets', t + '.md')
+        tf = pdir(repo, 'tickets', t + '.md')
         if clock and pcfg.get('auto_start') and os.path.exists(tf):
             live.append('%s starts by itself' % t)
     stopped = bool(ready) and not clock and not live and not [t for t in inflight if t not in owner]

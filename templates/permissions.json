@@ -1,5 +1,5 @@
 {
-  "_comment": "Permission rules the runtime's own scripts need to run unattended. `bin/permit apply` merges them, with the project's own rules (<repo>/.autopilot/permissions.json: checks, deploys, DNS, mail, MCP tools the approved plan needs, added with `bin/permit add`), into the settings; the owner types it once. Each script is listed under both path spellings (~ and the absolute home; {HOME} is replaced), because rules match the start of the command line and auto mode drops path wildcards. Outward actions (publishing, deploying, DNS, sending mail, merging to the default branch) are not here: they are pre-allowed per project, each as a row of the plan's `Pre-authorized actions` table that the owner approved. Never pre-allowed: paying for credits or plans, deleting data, a repository, or a production resource.",
+  "_comment": "Permission rules the runtime's own scripts need to run unattended. `bin/permit apply` merges them, with the project's own rules (<repo>/.maxxfactory/permissions.json: checks, deploys, DNS, mail, MCP tools the approved plan needs, added with `bin/permit add`), into the settings; the owner types it once. Each script is listed under both path spellings (~ and the absolute home; {HOME} is replaced), because rules match the start of the command line and auto mode drops path wildcards. Outward actions (publishing, deploying, DNS, sending mail, merging to the default branch) are not here: they are pre-allowed per project, each as a row of the plan's `Pre-authorized actions` table that the owner approved. Never pre-allowed: paying for credits or plans, deleting data, a repository, or a production resource.",
   "permissions": {
     "allow": [
       "Bash(~/.claude/skills/maxxfactory-run/bin/run-model *)",
@@ -55,6 +55,7 @@
       "Bash(~/.claude/skills/maxxfactory-run/bin/tokens *)",
       "Bash({HOME}/.claude/skills/maxxfactory-run/bin/tokens *)",
       "Bash(git worktree add *)",
+      "Bash(git push origin maxxfactory/*)",
       "Bash(git push origin autopilot/*)",
       "Bash(docker ps *)",
       "Bash(docker inspect *)",

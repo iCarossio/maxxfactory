@@ -4,7 +4,7 @@
 On 2026-11-22 a run waited a whole night because the coordinator was not allowed to run `gh workflow run publish.yml`
 and nobody was there to answer. Every command and MCP tool the plan needs is therefore pre-allowed up front.
 
-Wanted rules = templates/permissions.json (the runtime's own scripts) + <repo>/.autopilot/permissions.json (the
+Wanted rules = templates/permissions.json (the runtime's own scripts) + <repo>/.maxxfactory/permissions.json (the
 project's: checks, deploys, DNS, mail, MCP tools; each with why and who approved it).
 
   permit suggest [--no-mcp]             # ANTICIPATE: candidate rules read from the repo (dispatchable GitHub workflows,
@@ -13,7 +13,7 @@ project's: checks, deploys, DNS, mail, MCP tools; each with why and who approved
                                         # `permit add` those the plan really uses.
   permit check [--json]                 # wanted rules missing from the effective settings, one per line; exit 1 when any
   permit add '<rule>' --why TEXT [--by NAME]
-                                        # record a project rule in .autopilot/permissions.json (not applied yet), e.g.
+                                        # record a project rule in .maxxfactory/permissions.json (not applied yet), e.g.
                                         #   permit add 'Bash(gh workflow run publish.yml *)' --why "PLAN A2: publish to production"
                                         #   permit add 'mcp__cloudflare__execute' --why "PLAN A3: DNS switch"
   permit note '<prose>'                 # an auto-mode exception in plain words (autoMode.allow), for actions no rule can
@@ -65,7 +65,7 @@ def read(path):
 
 
 def project_file(repo):
-    return os.path.join(repo, '.autopilot', 'permissions.json')
+    return lib.pdir(repo, 'permissions.json')
 
 
 def wanted(repo):
@@ -152,7 +152,7 @@ def main(a):
     repo = lib.find_repo(required=False)
     cmd = a[0] if a else ''
     if cmd == 'suggest':
-        if not repo: sys.exit('permit suggest: no project (.autopilot/state.json) here')
+        if not repo: sys.exit('permit suggest: no project (.maxxfactory/state.json) here')
         cand = suggest(repo, '--no-mcp' not in a)
         for r, w in cand: print('%-60s # %s' % (r, w))
         print('permit: %d candidate rule(s), none recorded. For each one the plan uses: permit add \'<rule>\' --why "<A row or ticket>"' % len(cand))
@@ -167,7 +167,7 @@ def main(a):
             print('permissions: %s' % ('%d rule(s), %d note(s) missing -> show them to the owner; on their yes: `%s apply` (refused by the harness: the owner types it with a leading `! `)' % (len(mr), len(mn), os.path.realpath(__file__)) if mr or mn else 'nothing missing'))
         sys.exit(1 if mr or mn else 0)
     if cmd in ('add', 'note') and len(a) >= 2:
-        if not repo: sys.exit('permit %s: no project (.autopilot/state.json) here' % cmd)
+        if not repo: sys.exit('permit %s: no project (.maxxfactory/state.json) here' % cmd)
         if cmd == 'add':
             why = opt(a, '--why') or sys.exit('permit add: --why "<the plan row or the ticket that needs it>" is required')
             bad = refuse(a[1])

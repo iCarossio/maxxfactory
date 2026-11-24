@@ -8,7 +8,7 @@ down and flake. The folder that holds a project's repo and its `<repo>-wt` workt
   spotlight check [DIR...]   # exit 0: none indexed (or not macOS); exit 1: one `SPOTLIGHT: <dir> indexed (<n> items)` line each
   spotlight fix [DIR...]     # check, then open System Settings > Spotlight > Search Privacy and print what to add
 
-Without DIR: the parent folder of the project's repo (nearest .autopilot/state.json, $AUTOPILOT_REPO, else the git top
+Without DIR: the parent folder of the project's repo (nearest .maxxfactory/state.json, $AUTOPILOT_REPO, else the git top
 level of the current directory). Worktrees are always created in `<repo>-wt`, next to the repo, so that one folder
 covers the repo, its worktrees directory before it exists and after it was emptied, and every other project beside it.
 When the parent is the home directory or a volume root, the repo and its worktrees directory are checked instead (an

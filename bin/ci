@@ -12,7 +12,7 @@ pushed commit and was not skipped. On a finding: stop pushing (`state set push f
 project's CI, with the owner's agreement since it is their CI:
   pull_request workflows   every job gets `if: github.event.pull_request.draft == false`, and the trigger lists
                            `types: [opened, synchronize, reopened, ready_for_review]` so marking the PR ready starts CI
-  push workflows           `branches:` limited to the branches that deploy or release, or `branches-ignore: ['autopilot/**']`
+  push workflows           `branches:` limited to the branches that deploy or release, or `branches-ignore: ['maxxfactory/**', 'autopilot/**']`
 then `state set push true` and check again after the next push. At wrap-up, when the owner says the work is ready to
 merge: `state set pr_ready true`, `gh pr ready`; the rule is then off and CI runs. `pipeline run` runs this check with
 its hourly housekeeping and raises a CRITICAL alert on a finding. GitHub through `gh` only; another forge: apply the

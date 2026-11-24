@@ -9,9 +9,9 @@ generic, add the missed angles); with k > 1, each reviewer re-reads its own list
 with evidence and adds what both missed. The script merges the final list of every reviewer (deduplicated by title
 similarity), ranks by probability x impact and writes:
 
-  <repo>/.autopilot/plan/premortem-<key>-<pass>.md      full reviewer outputs
-  <repo>/.autopilot/plan/premortem.json                 merged, ranked reasons (machine-readable), with per-reviewer status
-  <repo>/.autopilot/plan/premortem.md                   the table to show the user verbatim
+  <repo>/.maxxfactory/plan/premortem-<key>-<pass>.md      full reviewer outputs
+  <repo>/.maxxfactory/plan/premortem.json                 merged, ranked reasons (machine-readable), with per-reviewer status
+  <repo>/.maxxfactory/plan/premortem.md                   the table to show the user verbatim
 
 Hard rules (fail closed):
 - --planner <roster key> is required (or --exclude-vendor): the planner's vendor and model id are excluded on every
@@ -22,7 +22,7 @@ Hard rules (fail closed):
   same vendor nor with another tier (the old --allow-mid is refused);
 - a reviewer that modified the tree, or whose output does not parse, does not count.
 
---out-dir DIR writes every file above to DIR instead of <repo>/.autopilot/plan/ (`bin/milestone add` uses it to keep a
+--out-dir DIR writes every file above to DIR instead of <repo>/.maxxfactory/plan/ (`bin/milestone add` uses it to keep a
 milestone's pre-mortem apart from the project's).
 
 Exit 0 = every reviewer completed both passes; 1 = degraded (fewer reviewers, or a pass-2 missing: the table says
@@ -86,7 +86,7 @@ if '--dry-run' in args:
     sys.exit(0 if len(pick) >= k else 1)
 if not pick:
     print('NO_REVIEWER: no healthy Tier 1 model outside the excluded vendors (run-model health / usage; wait: run-model wait premortem; tell the owner)'); sys.exit(2)
-out_dir = os.path.abspath(opt(args, '--out-dir', os.path.join(repo, '.autopilot', 'plan'))); os.makedirs(out_dir, exist_ok=True)
+out_dir = os.path.abspath(opt(args, '--out-dir', lib.pdir(repo, 'plan'))); os.makedirs(out_dir, exist_ok=True)
 plan = open(plan_path).read()
 plan_digest = lib.digest_text(plan)
 run_id = lib.now().strftime('%Y%m%dT%H%M%S')

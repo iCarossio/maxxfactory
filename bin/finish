@@ -14,11 +14,13 @@
 # Exit 4 when the push did not reach the remote.
 set -e
 ID=$1; SUBJ=$2; BODY=$3
-M=${AUTOPILOT_REPO:-$(d=$PWD; while [ "$d" != / ] && [ ! -f "$d/.autopilot/state.json" ]; do d=$(dirname "$d"); done; echo "$d")}
-[ -f "$M/.autopilot/state.json" ] || { echo "finish: no .autopilot/state.json"; exit 1; }
-IFS=$'\t' read -r BRANCH PUSH WTDEF TRAILER < <(python3 - "$M" "$ID" <<'PY'
+# Project state: <repo>/.maxxfactory/state.json, or <repo>/.autopilot/state.json for a project started before 2026-11-23.
+sf() { if [ -f "$1/.maxxfactory/state.json" ]; then echo "$1/.maxxfactory/state.json"; elif [ -f "$1/.autopilot/state.json" ]; then echo "$1/.autopilot/state.json"; fi; }
+M=${AUTOPILOT_REPO:-$(d=$PWD; while [ "$d" != / ] && [ -z "$(sf "$d")" ]; do d=$(dirname "$d"); done; echo "$d")}
+SF=$(sf "$M"); [ -n "$SF" ] || { echo "finish: no .maxxfactory/state.json"; exit 1; }
+IFS=$'\t' read -r BRANCH PUSH WTDEF TRAILER < <(python3 - "$M" "$ID" "$SF" <<'PY'
 import json, os, sys
-m = sys.argv[1]; s = json.load(open(os.path.join(m, '.autopilot', 'state.json')))
+m = sys.argv[1]; s = json.load(open(sys.argv[3]))
 # Worktree of the ticket (no apostrophe in this heredoc: bash rejects one inside <(...)): the one recorded when it went in flight, else <repo>-wt/<ISSUE> (always next to the repo).
 v = (s.get('inflight') or {}).get(sys.argv[2])
 wt = (v.get('wt') if isinstance(v, dict) else None) or os.path.join(os.path.abspath(m).rstrip('/') + '-wt', sys.argv[2])

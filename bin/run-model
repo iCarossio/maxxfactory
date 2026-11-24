@@ -53,7 +53,7 @@ Quota:
   cooldowns are cleared; `"codex_auto_reset": false` (or `claude_auto_reset`) in models.json turns it off. A 5-hour limit alone never triggers it;
 - a reading older than a successful run or smoke of the account is stale: never re-applied as a cooldown;
 - a vendor down on every account (or plan_review/premortem without an eligible model) after that is a CRITICAL alert:
-  `CRITICAL:` on stderr, `.autopilot/alerts.jsonl`, a Linear project update; the coordinator tells the owner at once.
+  `CRITICAL:` on stderr, `.maxxfactory/alerts.jsonl`, a Linear project update; the coordinator tells the owner at once.
 
 Roster, accounts and health: $AUTOPILOT_CONFIG_DIR/models.json. CLI invocation: harnesses/<cli>.json adapters.
 """
@@ -271,10 +271,10 @@ def supervise(cmd, cwd, timeout, idle, logpath, env, qrx=None, a=None):
 
 
 def repo_for(brief, cwd):
-    """The project of a run: $AUTOPILOT_REPO (validated), else the nearest .autopilot/state.json above the brief or cwd."""
+    """The project of a run: $AUTOPILOT_REPO (validated), else the nearest .maxxfactory/state.json above the brief or cwd."""
     if os.environ.get('AUTOPILOT_REPO'):
         if not os.path.exists(lib.state_path(os.environ['AUTOPILOT_REPO'])):
-            sys.exit('run-model: AUTOPILOT_REPO=%s has no .autopilot/state.json' % os.environ['AUTOPILOT_REPO'])
+            sys.exit('run-model: AUTOPILOT_REPO=%s has no .maxxfactory/state.json' % os.environ['AUTOPILOT_REPO'])
         return os.path.abspath(os.environ['AUTOPILOT_REPO'])
     for start in (os.path.dirname(os.path.abspath(brief)), os.path.abspath(cwd)):
         d = start
@@ -368,14 +368,14 @@ def cmd_run(args):
         refuse(role, issue, 'role %s reviews, it never implements' % role)
     ex_vendors = [v for v in (args[args.index('--exclude-vendor') + 1] if '--exclude-vendor' in args else '').split(',') if v]
     if kind == 'review' and not (issue and repo) and '--standalone' not in args:
-        print(json.dumps({'status': 'error', 'role': role, 'reason': 'a review run needs --issue <ID> inside a project with .autopilot/state.json (or a brief named <ISSUE>-review-<n>.md), or --standalone for a review that is not about a ticket'})); sys.exit(4)
+        print(json.dumps({'status': 'error', 'role': role, 'reason': 'a review run needs --issue <ID> inside a project with .maxxfactory/state.json (or a brief named <ISSUE>-review-<n>.md), or --standalone for a review that is not about a ticket'})); sys.exit(4)
     keys_, ids_ = lib.implementers_of(repo, issue) if kind == 'review' and issue and repo else ([], [])
     if role in lib.PLAN_ROLES:
         coord = lib.load_state(repo).get('coordinator') if repo else None
         if coord in r['models']:
             keys_ = keys_ + [coord]; ex_vendors.append(lib.vendor_of(r['models'][coord], ad.get(r['models'][coord]['cli'])))
         if not ex_vendors:
-            print(json.dumps({'status': 'error', 'role': role, 'reason': 'a plan review needs the planner identity: `coordinator` (roster key) in .autopilot/state.json, or --exclude-vendor <vendor>'})); sys.exit(4)
+            print(json.dumps({'status': 'error', 'role': role, 'reason': 'a plan review needs the planner identity: `coordinator` (roster key) in .maxxfactory/state.json, or --exclude-vendor <vendor>'})); sys.exit(4)
     excluded = lib.expand_exclusions(r, keys=keys_, identities=ids_, vendors=ex_vendors, ad=ad) if kind == 'review' else set()
     if kind == 'review' and role not in lib.PLAN_ROLES and repo:
         excluded -= lib.review_exemptions(repo, r)  # owner exception for a quota gap
@@ -445,7 +445,7 @@ def cmd_run(args):
             lib.resolve_alert(repo, 'coordinator_reserve', lib.account_key(m, a))
         if kind == 'implement':
             if not (issue and repo):
-                print(json.dumps({'status': 'error', 'role': role, 'reason': 'implement runs need a ticket identity: --issue <ID> or a brief named <ISSUE>-impl-<n>.md inside a project with .autopilot/state.json'})); sys.exit(4)
+                print(json.dumps({'status': 'error', 'role': role, 'reason': 'implement runs need a ticket identity: --issue <ID> or a brief named <ISSUE>-impl-<n>.md inside a project with .maxxfactory/state.json'})); sys.exit(4)
             lib.record_implementer(repo, issue, k, m, a or lib.adapter_of(m))
         acct = lib.account_key(m, a)
         lib.update_reg(lambda rr: rr.setdefault('last_used', {}).__setitem__(acct, now().isoformat()))

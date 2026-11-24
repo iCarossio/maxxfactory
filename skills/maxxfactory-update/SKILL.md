@@ -19,7 +19,7 @@ maxxfactory is shared: many people run it on projects you will never see. An upd
 ## 0. Where you are
 
 1. `git -C <repo> status --short`. Changes that are already pending are not yours: list them to the owner, never revert them, never fold them into this update.
-2. Never touch a project from here: no edit of a project's `.autopilot/state.json`, pipeline, worktrees or `PLAN.md`. You may read a project (state, logs, briefs) to understand an incident.
+2. Never touch a project from here: no edit of a project's `.maxxfactory/state.json`, pipeline, worktrees or `PLAN.md`. You may read a project (state, logs, briefs) to understand an incident.
 
 ## 1. Restate the request as rules
 

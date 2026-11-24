@@ -6,7 +6,7 @@ Usage:
   bgrun ls        list jobs started by bgrun in this project, with the age of their last output
 
 The command runs in its own session, with stdin closed and stdout and stderr appended to the log
-(default: .autopilot/out/bg-<name>.log). Every 5 s the watchdog checks for progress: the log grew, or a
+(default: .maxxfactory/out/bg-<name>.log). Every 5 s the watchdog checks for progress: the log grew, or a
 --watch path (file or directory, not recursive) changed, or the run started a new process (a test runner
 that prints only when a whole file ends still spawns builds and browsers while it works). When nothing moved for --idle seconds
 (default 900), or the run exceeds --timeout seconds (default: none), it writes a STALL or TIMEOUT report
@@ -28,6 +28,9 @@ without a watchdog.
 """
 import json, os, signal, subprocess, sys, time
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import autopilot_lib as lib
+
 POLL = 5
 
 
@@ -36,7 +39,7 @@ def find_repo():
         return os.environ['AUTOPILOT_REPO']
     d = os.getcwd()
     while d != '/':
-        if os.path.exists(os.path.join(d, '.autopilot', 'state.json')):
+        if os.path.exists(lib.pdir(d, 'state.json')):
             return d
         d = os.path.dirname(d)
     return None
@@ -134,18 +137,18 @@ def tail(path, n=15):
 
 
 def jobs_dir(repo):
-    d = os.path.join(repo, '.autopilot', 'jobs')
+    d = lib.pdir(repo, 'jobs')
     os.makedirs(d, exist_ok=True)
     return d
 
 
 def cmd_ls():
     repo = find_repo()
-    if not repo or not os.path.isdir(os.path.join(repo, '.autopilot', 'jobs')):
+    if not repo or not os.path.isdir(lib.pdir(repo, 'jobs')):
         print('no bgrun jobs')
         return 0
     now = time.time()
-    d = os.path.join(repo, '.autopilot', 'jobs')
+    d = lib.pdir(repo, 'jobs')
     for name in sorted(os.listdir(d)):
         try:
             j = json.load(open(os.path.join(d, name)))
@@ -183,7 +186,7 @@ def main(argv):
     repo = find_repo()
     name = name or os.path.basename(cmd[0].split()[0]) + '-' + time.strftime('%H%M%S')
     if not log:
-        base = os.path.join(repo, '.autopilot', 'out') if repo else os.getcwd()
+        base = lib.pdir(repo, 'out') if repo else os.getcwd()
         os.makedirs(base, exist_ok=True)
         log = os.path.join(base, f'bg-{name}.log')
     log = os.path.abspath(log)

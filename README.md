@@ -102,7 +102,7 @@ Google models run through Antigravity; the Gemini CLI adapter is shipped but unt
 - **Spotlight off.** `bin/spotlight check` (macOS): agents rewrite thousands of files an hour, and an indexed tree keeps Spotlight busy all day. The folder that holds the repo and its `<repo>-wt` must be excluded: init, plan, plan-more, run and resume all check it; `bin/eta` warns while it is indexed.
 - **Housekeeping.** `bin/docker-up` / `bin/docker-reap` keep the Docker daemon up and remove dead containers; `bin/bgrun` runs long commands under a stall watchdog.
 - **Linear without MCP.** `bin/linear` is a minimal GraphQL client (`LINEAR_API_KEY`) for harnesses that have no Linear tools.
-- **Nothing personal in the repo.** Roster, accounts and cooldowns live in `~/.config/maxxfactory/`; project state in `<repo>/.autopilot/`.
+- **Nothing personal in the repo.** Roster, accounts and cooldowns live in `~/.config/maxxfactory/`; project state in `<repo>/.maxxfactory/`.
 
 ## Commands
 
@@ -121,7 +121,7 @@ The skills are the interface; they call the runtime in `bin/`, which you can als
 | `bin/idea` | parks, lists and promotes ideas in the "Ideas (unscheduled)" milestone |
 | `bin/eta` | progress bar and ETA of the project (`-v` adds the schedule) |
 | `bin/decision` | the sourced decision log in `PLAN.md` |
-| `bin/state` | locked edits of `.autopilot/state.json` |
+| `bin/state` | locked edits of `.maxxfactory/state.json` |
 | `bin/alert` | lists, raises and resolves CRITICAL alerts |
 | `bin/access` | what the agents can act with: ops CLIs logged in, MCP servers, `.env` variable names |
 | `bin/permit` | the permission rules a run needs: `suggest`, `check`, `add`, `note`, `apply` (user settings, with the owner's consent) |
@@ -152,6 +152,8 @@ The links are absolute paths into this clone. **If you move or rename the clone,
 Then run `/maxxfactory-init`. Requires Python 3.9+, git, a Linear workspace, and the model CLIs you want to use, logged in. On macOS, keep your repos in one folder (not directly in your home directory) and exclude that folder from Spotlight (System Settings > Spotlight > Search Privacy); `bin/spotlight check` verifies it.
 
 Upgrading from `linear-autopilot`: run `./install.sh` again from the renamed clone (see above); an existing `~/.config/linear-autopilot/` keeps working until you rename it to `~/.config/maxxfactory/`.
+
+A project started before 2026-11-23 keeps its `<repo>/.autopilot/` directory and its `autopilot/<NAME>` branches: every script reads them in place. `bin/state migrate` (run by `/maxxfactory-continue` while the pipeline is stopped) moves the directory to `<repo>/.maxxfactory/` and leaves `.autopilot` as a link; new ticket branches are `maxxfactory/<NAME>`, and an existing `autopilot/<NAME>` branch is reused until its ticket is merged.
 
 ## Passing a secret to a session
 

@@ -13,7 +13,7 @@ Touches: `<path>`, `<path>` <the files or folders this ticket may change; parall
 - <criterion>
 
 **Look** (tickets that change something a user sees; do not remove)
-- References to match: <images under .autopilot/plan/refs/>
+- References to match: <images under .maxxfactory/plan/refs/>
 - Look criteria on realistic data: <e.g. one line per row <= 52 px, no raw ids or markup, no clipping, empty/loading/error states>
 - Full-page screenshots at desktop and phone widths in docs/notes/<ISSUE>/, next to the references. Working but ugly is not done.
 

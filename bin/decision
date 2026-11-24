@@ -17,7 +17,7 @@ Source kinds:
   human-default:<open decision>          check:<command and result>   coordinator:<evidence: command, file, number>
 --linear defaults to `pre-linear` when state.json has no project_id yet (the plan skill puts the whole PLAN.md in the
 project content at creation), else `pending` until `synced`.
-Repo: $AUTOPILOT_REPO, else the nearest .autopilot/state.json, else the git root of the current directory. PLAN.md path:
+Repo: $AUTOPILOT_REPO, else the nearest .maxxfactory/state.json, else the git root of the current directory. PLAN.md path:
 $AUTOPILOT_PLAN overrides.
 """
 import argparse, datetime, json, os, re, subprocess, sys

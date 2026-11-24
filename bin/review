@@ -3,7 +3,7 @@
 
 The ticket loop is one implementer, one reviewer, and again if needed. This runs k
 reviewers (default 1) through run-model and validates each verdict, prints one line per reviewer + blocking findings,
-and writes them to .autopilot/out/<ISSUE>-findings-<round>.md (input of the next implementation round).
+and writes them to .maxxfactory/out/<ISSUE>-findings-<round>.md (input of the next implementation round).
 
 Exit 0 = MIN_REVIEWS valid approvals and no valid "changes" verdict; 1 = changes required; 2 = not enough valid
 verdicts after every eligible healthy reviewer was tried (no eligible reviewer, or each one failed: quota, timeout,
@@ -50,7 +50,7 @@ iss, n, brief = sys.argv[1:4]
 k = int(sys.argv[4]) if len(sys.argv) > 4 else 1
 M = lib.find_repo()
 CWD = os.environ.get('WT', M)
-OUT = os.path.join(M, '.autopilot', 'out'); os.makedirs(OUT, exist_ok=True)
+OUT = lib.pdir(M, 'out'); os.makedirs(OUT, exist_ok=True)
 reg = lib.load_reg(); ad = lib.adapters(); state = lib.load_state(M)
 POOL = os.environ.get('POOL', 'review')
 ROLE = lib.role_of(POOL)
@@ -71,7 +71,7 @@ if PLAN:
     if coord in reg['models']:
         ex_vendors.append(lib.vendor_of(reg['models'][coord], ad.get(reg['models'][coord]['cli'])))
     if not ex_vendors:
-        sys.exit('review: a plan review needs the planner identity: set `coordinator` (roster key) in .autopilot/state.json or EXCLUDE_VENDOR=<vendor>')
+        sys.exit('review: a plan review needs the planner identity: set `coordinator` (roster key) in .maxxfactory/state.json or EXCLUDE_VENDOR=<vendor>')
 EX = lib.expand_exclusions(reg, keys=ex_keys, vendors=ex_vendors, identities=impl_ids, ad=ad)
 if not PLAN:
     EX -= lib.review_exemptions(M, reg)  # owner exception for a quota gap, see review_exemptions

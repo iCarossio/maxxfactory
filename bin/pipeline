@@ -11,7 +11,7 @@ ticket's worktree, and bin/review.
                                                   # Sets the Linear state to In Progress (or the team's started state);
                                                   # a Linear failure is a warning and never blocks the start.
   pipeline wt [NAME] [--detach] [--from REF]     # the one way to create a worktree by hand: prints <repo>-wt, or creates
-                                                  # <repo>-wt/<NAME> if missing (branch autopilot/<NAME> from the project
+                                                  # <repo>-wt/<NAME> if missing (branch maxxfactory/<NAME> from the project
                                                   # branch; --detach for a scratch checkout: a suite, a plan review) and
                                                   # prints its path. Worktrees live next to the repo, in <repo>-wt, nowhere else.
   pipeline fix <ISSUE> <findings.md>             # the coordinator's own next round (after triage, or instead of a stuck step)
@@ -27,21 +27,21 @@ ticket's worktree, and bin/review.
 
 Per ticket, state.json `inflight.<ISSUE>`: `wt`, `round`, `stage`, `stage_at`, optional `pool` (review pool for
 bin/review), and the pipeline's own bookkeeping (`tries`, `merges`, `why`, `stuck_from`). Stages the loop drives:
-  implement  round <n> runs; its run-model JSON line lands in .autopilot/out/<ISSUE>-impl-<n>.json. ok -> rebase.
+  implement  round <n> runs; its run-model JSON line lands in .maxxfactory/out/<ISSUE>-impl-<n>.json. ok -> rebase.
   merge      a merge-only round after a rebase conflict: brief <ISSUE>-impl-<n>m<k>.md, --no-escalate, same round.
   rebase     bring the worktree onto state.json `branch` (bin/rebase-wt: own commits are rebased, a conflict is left
              in progress); conflict -> merge round, else -> review once a check slot is free (`max_jobs`).
   review     the checks (ticket `CHECKS:` line, else state.json `checks`), then one bin/review run, in the background;
-             progress in .autopilot/pipeline/<ISSUE>-<n>.check. Check failed or changes -> fix round <n+1>;
+             progress in .maxxfactory/pipeline/<ISSUE>-<n>.check. Check failed or changes -> fix round <n+1>;
              approve -> approved; no verdict -> the review again (`review_retries`), then stuck.
   final      two-level checks only (state.json `checks_fast` or a ticket `CHECKS_FAST:` line): each round runs the fast
              checks before its review; once the review approves, the full checks run here, once, `max_full_jobs` at a
-             time (progress in .autopilot/pipeline/<ISSUE>-<n>.final). Pass -> approved; fail -> fix round.
-  approved   listed in .autopilot/pipeline/approved.txt (`<ISSUE> r<n>`) until `pipeline merge` takes it; with
+             time (progress in .maxxfactory/pipeline/<ISSUE>-<n>.final). Pass -> approved; fail -> fix round.
+  approved   listed in .maxxfactory/pipeline/approved.txt (`<ISSUE> r<n>`) until `pipeline merge` takes it; with
              `auto_merge` the loop merges it itself (subject `<merge_prefix>: <ticket title> [<ISSUE>]`), logged in
-             .autopilot/pipeline/merged.txt.
+             .maxxfactory/pipeline/merged.txt.
   starting   `auto_start`: worktree created, `setup` then `pipeline start` running in the background (log
-             .autopilot/out/<ISSUE>-start.log).
+             .maxxfactory/out/<ISSUE>-start.log).
   triage     round `max_rounds` (5) still has findings and the review is not converging (a review with fewer blocking
              findings than the previous one goes on by itself, up to `max_rounds_hard`); or the implementer reported
              `STATUS: blocked`; or a round changed nothing twice (the second run one tier up). The coordinator settles
@@ -55,12 +55,12 @@ automatic escalation after round 3 applies. Every fix brief ends with the rule t
 the `Touches` nor the really changed files of a ticket in flight (shared test and docs paths excepted; `Touches` is not
 a fence for the reviewer: each round logs `outside Touches: ...`).
 A blocked implementer that only asks for files (`NEEDS:` line) is granted them by the loop, `max_grants` times per
-ticket, unless a path is reserved (`.autopilot/`, `reserved_paths`, the ticket's `Do not touch:` line) or claimed by
+ticket, unless a path is reserved (`.maxxfactory/` (`.autopilot/` before 2026-11-23), `reserved_paths`, the ticket's `Do not touch:` line) or claimed by
 another ticket in flight; triage, stuck or approved tickets unanswered for `attention_minutes` raise a CRITICAL alert, up to `target_inflight` (0: 2 x max_jobs).
 Settings: state.json `pipeline` {interval 60, max_jobs 3, max_rounds 5, max_rounds_hard 8, max_merges 3,
 review_retries 3, impl_retries 3, retry_minutes 10, check_timeout_minutes 60, check_silence_minutes 25, max_full_jobs 2,
 auto_merge false, auto_start false, target_inflight 0, setup "", merge_prefix "feat"}. With the worktree garbage
-collection (`gc_minutes`) the loop also runs the `bin/ci` check: a CI run on a push of the draft project branch is a CRITICAL alert. Log: .autopilot/pipeline/pipeline.log.
+collection (`gc_minutes`) the loop also runs the `bin/ci` check: a CI run on a push of the draft project branch is a CRITICAL alert. Log: .maxxfactory/pipeline/pipeline.log.
 Tests: PIPELINE_SYNC=1 runs every dispatch in the foreground; PIPELINE_RUN_MODEL, PIPELINE_REVIEW, PIPELINE_FINISH
 (any bin script name) replace that script.
 """
@@ -226,7 +226,7 @@ def wt_of(st, t, v=None):
 
 
 def ticket_file(t):
-    return os.path.join(M, '.autopilot', 'tickets', t + '.md')
+    return lib.pdir(M, 'tickets', t + '.md')
 
 
 def ticket_line(t, key):
@@ -367,7 +367,7 @@ def needs_of(res, name):
 def grant(t, v, st, c, need):
     """A blocked round that only asks for files is settled by the loop (2026-11-23: four tickets blocked on a file
     waited 4 h 20 for a coordinator session that was silent, with two approved tickets unmerged behind them).
-    Granted: every path is inside the repo, is not reserved (`.autopilot/`, `.git/`, `reserved_paths`, the ticket's
+    Granted: every path is inside the repo, is not reserved (`.maxxfactory/` (`.autopilot/` before 2026-11-23), `.git/`, `reserved_paths`, the ticket's
     `Do not touch:` line) and is claimed by no other ticket in flight (its `Touches` and the files it really
     changed); at most `max_grants` times per ticket. Returns (granted, reason)."""
     k = int(v.get('grants') or 0)
@@ -382,7 +382,7 @@ def grant(t, v, st, c, need):
         dnt |= {p.strip().rstrip('/') for p in re.findall(r'`([^`]+)`', l)}
     need = [os.path.normpath(p) for p in need]
     for p in need:
-        if os.path.isabs(p) or p.startswith('..') or ' ' in p or re.match(r'\.(autopilot|git)(/|$)', p):
+        if os.path.isabs(p) or p.startswith('..') or ' ' in p or re.match(r'\.(maxxfactory|autopilot|git)(/|$)', p):
             return False, '%s is outside the repo or reserved' % p
         if c['reserved_paths'] and re.search(c['reserved_paths'], p):
             return False, '%s matches reserved_paths' % p
@@ -470,7 +470,7 @@ def linear_in_progress(t):
 
 
 def dispatch(t, wt, name, extra):
-    brief = os.path.join(M, '.autopilot', 'briefs', name + '.md')
+    brief = lib.pdir(M, 'briefs', name + '.md')
     spawn([tool('run-model'), 'run', 'implement', brief, os.path.join(OUT, name + '.md'), '--cwd', wt, '--issue', t] + extra,
           out=os.path.join(OUT, name + '.json'))
 
@@ -684,11 +684,11 @@ def on_review(t, v, st, c):
         fix_round(t, v, st, c, 'Blocking review findings to fix:\n\n' + body, 'changes')
     elif rc == '3':
         stuck(t, 'review', r, 'bin/review exit 3: a reviewer changed the history or the tree could not be restored; inspect %s '
-              '(.autopilot/out/review-%s-%s.txt)' % (wt_of(st, t, v), t, r))
+              '(%s)' % (wt_of(st, t, v), os.path.relpath(lib.pdir(M, 'out', 'review-%s-%s.txt' % (t, r)), M)))
     else:
         tries = int(v.get('tries') or 0)
         if tries >= c['review_retries']:
-            stuck(t, 'review', r, 'no review verdict after %d tries (bin/review rc=%s, .autopilot/out/review-%s-%s.txt)' % (tries + 1, rc, t, r))
+            stuck(t, 'review', r, 'no review verdict after %d tries (bin/review rc=%s, %s)' % (tries + 1, rc, os.path.relpath(lib.pdir(M, 'out', 'review-%s-%s.txt' % (t, r)), M)))
             return
         if transition(t, 'review', r, tries=tries + 1):
             log('%s r%s: no verdict (review rc=%s) -> review again (%d/%d)' % (t, r, rc, tries + 1, c['review_retries']))
@@ -756,7 +756,7 @@ def on_run(t, v, st, c):
     res = result(js)
     tries = int(v.get('tries') or 0)
     if res is None:
-        brief = os.path.join(M, '.autopilot', 'briefs', name + '.md')
+        brief = lib.pdir(M, 'briefs', name + '.md')
         if run_alive(name) or age(v) < GRACE or not os.path.exists(brief):
             return  # running, just dispatched, or never dispatched (the coordinator owns the first dispatch)
         if not os.path.exists(js):
@@ -989,7 +989,7 @@ def auto_start(st, c):
             continue
         wt = wt_of(st, t, {})
         if not os.path.isdir(wt):
-            br = 'autopilot/' + t
+            br = lib.ticket_branch(M, t)
             exists = lib.git(M, 'rev-parse', '-q', '--verify', 'refs/heads/' + br).returncode == 0
             g = lib.git(M, 'worktree', 'add', '-q', *([wt, br] if exists else ['-b', br, wt, st['branch']]))
             if g.returncode:
@@ -1052,7 +1052,7 @@ def cmd_run(a):
     except OSError:
         sys.exit('pipeline: already running for %s (lock %s)' % (M, lk.name))
     if '--once' not in a:
-        print('pipeline: running for %s, every %ss (log .autopilot/pipeline/pipeline.log)' % (M, interval), flush=True)
+        print('pipeline: running for %s, every %ss (log %s)' % (M, interval, lib.pdir(M, 'pipeline', 'pipeline.log')), flush=True)
     while True:
         del EVENTS[:]
         try:
@@ -1079,7 +1079,7 @@ def cmd_wt(a):
     wt = os.path.join(root, name)
     if not os.path.isdir(wt):
         ref = a[a.index('--from') + 1] if '--from' in a else (st.get('branch') or 'HEAD')
-        br = 'autopilot/' + name
+        br = lib.ticket_branch(M, name)
         if '--detach' in a:
             args = ['--detach', wt, ref]
         elif lib.git(M, 'rev-parse', '-q', '--verify', 'refs/heads/' + br).returncode == 0:
@@ -1361,7 +1361,7 @@ def main(a):
     if not a or a[0] in ('-h', '--help'):
         print(__doc__); sys.exit(0 if a else 1)
     M = lib.find_repo()
-    PD, OUT = os.path.join(M, '.autopilot', 'pipeline'), os.path.join(M, '.autopilot', 'out')
+    PD, OUT = lib.pdir(M, 'pipeline'), lib.pdir(M, 'out')
     os.makedirs(PD, exist_ok=True); os.makedirs(OUT, exist_ok=True)
     cmd = a[0]
     if cmd == 'run':

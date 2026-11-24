@@ -3,13 +3,13 @@
 
 `run-model` raises them (run, `usage --apply`, `alerts`): a vendor out of quota on every account once the resets were
 tried (no reset left, reset failed, auto-reset disabled), or plan_review/premortem without an eligible model. Each one
-is also posted as a Linear project update when state.json has a project. They live in <repo>/.autopilot/alerts.jsonl
+is also posted as a Linear project update when state.json has a project. They live in <repo>/.maxxfactory/alerts.jsonl
 (and $AUTOPILOT_CONFIG_DIR/alerts.jsonl for alerts raised outside a project). An alert stays listed until acknowledged,
 even after it resolved, so an outage that ended while the owner was away is still reported.
 
   alert list [--all] [--json]   # unacknowledged alerts (--all: acknowledged too), one `CRITICAL: ...` line each; nothing = no line
   alert ack <ID|all>            # acknowledge once the owner has been told (the message to the user, with the reset times)
-Repo: nearest .autopilot/state.json above the current directory, or $AUTOPILOT_REPO (none: machine-level alerts only).
+Repo: nearest .maxxfactory/state.json above the current directory, or $AUTOPILOT_REPO (none: machine-level alerts only).
 """
 import json, os, sys
 

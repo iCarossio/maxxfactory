@@ -26,9 +26,9 @@ and their Linear milestone never gets a target date.
 add: extends a running project with a milestone, in this order, never skipping a step without a logged flag:
   a. validation (unknown dependencies, cycles, duplicate slugs, a KPI without target or measurement);
   b. pre-mortem of the milestone delta (`bin/premortem`, the existing PLAN.md as context) into
-     .autopilot/plan/milestones/<id>/premortem.md;
+     .maxxfactory/plan/milestones/<id>/premortem.md;
   c. adversarial plan review of the milestone section (`bin/review`, POOL=plan_review) into .../plan-review.md;
-     b and c run in a detached worktree `.autopilot/review-wt/<id>` (removed afterwards, also on failure),
+     b and c run in a detached worktree `.maxxfactory/review-wt/<id>` (removed afterwards, also on failure),
      not in the main checkout. The milestone input, PLAN.md text and --out-dir stay absolute paths in the main repo.
   d. STOP, exit 3: the findings are printed for the owner and coordinator to fold into the spec. A second invocation
      with --approved --by <who> --source <kind:ref> continues (it stops again if b or c had to run in it);
@@ -84,7 +84,7 @@ tidy (also run by sync):
   a. deletes this project's milestones that have no issues and are not in state.json `milestones` (matched by
      linear_id or name). Never the "Ideas (unscheduled)" milestone, never one with any issue.
   b. archives empty projects this autopilot created for the repo, excluding the current project. Creation is
-     `project_created: true` on `.autopilot/plan/**/tickets.created.json` (that file's `project_id`, or
+     `project_created: true` on `.maxxfactory/plan/**/tickets.created.json` (that file's `project_id`, or
      `created_project_id` when a plan was folded into another project), a legacy reserved `pending` project id, or
      state.json `autopilot_project_ids`. An imported destination (`project_created: false`) is not evidence.
   c. ticket states follow state.json: `inflight` -> In Progress (else the team's started state), `done` -> Done
@@ -272,7 +272,7 @@ def row_when(r):
 
 def known_slugs(repo, skip=None):
     """slug -> identifier for every ticket already created from a tickets.json of this project (except under `skip`)."""
-    out, base = {}, os.path.join(repo, '.autopilot')
+    out, base = {}, lib.pdir(repo)
     paths = []
     for root, _, files in os.walk(base):
         if root == skip: continue
@@ -322,7 +322,7 @@ def validate(spec, st, repo, mid):
     slugs = [t.get('slug') for t in tickets]
     dup = sorted({s for s in slugs if slugs.count(s) > 1})
     if dup: errs.append(f'duplicate slugs {dup}')
-    known = known_slugs(repo, skip=os.path.join(repo, '.autopilot', 'plan', 'milestones', mid))
+    known = known_slugs(repo, skip=lib.pdir(repo, 'plan', 'milestones', mid))
     scope = set(scope_of(st)) | set(st.get('done', [])) | set(st.get('blockers', {}))
     if not st.get('blockers') and any(t not in st.get('done', []) for t in scope_of(st)):
         errs.append('state.json has no `blockers` for the open tickets: the stages could not be recomputed with the new '
@@ -432,7 +432,7 @@ def whatif_proposed(repo, st):
     for mid, p in props.items():
         try: spec = lib.read_json(p['spec'])
         except (OSError, ValueError): continue
-        status_path = os.path.join(repo, '.autopilot', 'plan', 'milestones', mid, 'status.json')
+        status_path = lib.pdir(repo, 'plan', 'milestones', mid, 'status.json')
         status = lib.read_json(status_path) if os.path.exists(status_path) else {}
         resolved = status.get('resolved')
         if not resolved:
@@ -483,24 +483,12 @@ def drop_review_worktree(repo, wt):
 
 
 def ensure_autopilot_ignored(repo):
-    """The review worktree lives under .autopilot/ and must not show up as an untracked tree."""
-    if subprocess.run(['git', '-C', repo, 'check-ignore', '-q', '.autopilot/review-wt'], capture_output=True).returncode == 0:
-        return
-    p = subprocess.run(['git', '-C', repo, 'rev-parse', '--absolute-git-dir'], capture_output=True, text=True)
-    git_dir = (p.stdout or '').strip()
-    if p.returncode != 0 or not git_dir:
-        return
-    excl = os.path.join(git_dir, 'info', 'exclude')
-    os.makedirs(os.path.dirname(excl), exist_ok=True)
-    prev = open(excl).read() if os.path.exists(excl) else ''
-    if '.autopilot/' not in prev.splitlines() and '.autopilot' not in prev.splitlines():
-        if prev and not prev.endswith('\n'):
-            prev += '\n'
-        open(excl, 'w').write(prev + '.autopilot/\n')
+    """The review worktree lives under the project directory and must not show up as an untracked tree."""
+    lib.ensure_ignored(repo)
 
 
 def make_review_worktree(repo, mid):
-    """Detached checkout at <repo>/.autopilot/review-wt/<id>.
+    """Detached checkout at <repo>/.maxxfactory/review-wt/<id>.
 
     The pre-mortem and the plan review run here. A file the coordinator writes in the main checkout during
     the run is then not part of the reviewer's tree, and restoring that tree cannot delete it. premortem
@@ -508,7 +496,7 @@ def make_review_worktree(repo, mid):
     --out-dir stay absolute paths in the main repo.
     """
     ensure_autopilot_ignored(repo)
-    wt = os.path.join(repo, '.autopilot', 'review-wt', mid)
+    wt = lib.pdir(repo, 'review-wt', mid)
     if os.path.lexists(wt):
         drop_review_worktree(repo, wt)
     if os.path.lexists(wt):
@@ -520,10 +508,10 @@ def make_review_worktree(repo, mid):
         drop_review_worktree(repo, wt)
         die('review worktree: %s' % ((p.stderr or p.stdout or 'git worktree add failed').strip()))
     try:
-        src = os.path.join(repo, '.autopilot', 'state.json')
+        src = lib.pdir(repo, 'state.json')
         if os.path.exists(src):
-            os.makedirs(os.path.join(wt, '.autopilot'), exist_ok=True)
-            with open(src) as f, open(os.path.join(wt, '.autopilot', 'state.json'), 'w') as g:
+            os.makedirs(lib.pdir(wt), exist_ok=True)
+            with open(src) as f, open(lib.pdir(wt, 'state.json'), 'w') as g:
                 g.write(f.read())
     except BaseException:
         drop_review_worktree(repo, wt)
@@ -545,7 +533,7 @@ def cmd_add(a):
         print(f'INVALID: milestone id {spec["id"]!r} already exists: a batch added with "into" needs a new id'); sys.exit(1)
     what = f'{len(spec.get("tickets") or [])} tickets into milestone {spec["name"]!r}' if into else None
     mid = spec.get('id') or re.sub(r'[^a-z0-9]+', '-', (spec.get('name') or '').lower()).strip('-')
-    d = os.path.join(repo, '.autopilot', 'plan', 'milestones', mid)
+    d = lib.pdir(repo, 'plan', 'milestones', mid)
     status_path = os.path.join(d, 'status.json')
     status = lib.read_json(status_path) if os.path.exists(status_path) else {}
 
@@ -791,7 +779,7 @@ def cmd_seed(a):
     ids = {s_: v['identifier'] for s_, v in created['tickets'].items()}
     missing = [t['slug'] for t in spec['tickets'] if t['slug'] not in ids]
     if missing: die(f'tickets not created in Linear yet: {missing}')
-    pm = os.path.join(repo, '.autopilot', 'plan', 'premortem.md')
+    pm = lib.pdir(repo, 'plan', 'premortem.md')
     ms = []
     for m in spec.get('milestones') or []:
         mid = m.get('id') or re.sub(r'[^a-z0-9]+', '-', m['name'].lower()).strip('-')
@@ -839,7 +827,7 @@ def cmd_adopt(a):
         print(f'valid: milestone {a.name!r} ({a.id}) over {len(issues)} existing tickets; Linear: '
               + (f'link {a.linear_id}' if a.linear_id else 'create the milestone and move the issues' if a.create_linear else 'none'))
         return
-    d = os.path.join(repo, '.autopilot', 'plan', 'milestones', a.id); os.makedirs(d, exist_ok=True)
+    d = lib.pdir(repo, 'plan', 'milestones', a.id); os.makedirs(d, exist_ok=True)
     cp = os.path.join(d, 'adopt.json')
     ck = lib.read_json(cp) if os.path.exists(cp) else {'moved': []}
     if not ck.get('decision'):
@@ -911,7 +899,7 @@ def autopilot_project_ids(repo, st):
     false` is an imported destination and is ignored.
     """
     ids = set(st.get('autopilot_project_ids') or [])
-    base = os.path.join(repo, '.autopilot', 'plan')
+    base = lib.pdir(repo, 'plan')
     for root, _, files in os.walk(base):
         if 'tickets.created.json' not in files:
             continue
