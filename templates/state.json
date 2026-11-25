@@ -7,7 +7,7 @@
   "trailer": "",
   "checks": [],
   "context_files": ["AGENTS.md", "PLAN.md"],
-  "coordinator": "<roster key of the model this coordinator session runs (Tier 1)>",
+  "coordinator": "<roster key of the model this session runs: the planner (Tier 0) while planning, the coordinator (Tier 1) during a run>",
   "coordinator_account": null,
   "exclude": {},
   "milestones": [],

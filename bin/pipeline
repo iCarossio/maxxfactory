@@ -10,7 +10,10 @@ ticket's worktree, and bin/review.
   pipeline start <ISSUE> [--wt PATH] [--pool P]  # put a planned ticket in flight: round 1 brief + Tier 3 implementer.
                                                   # Sets the Linear state to In Progress (or the team's started state);
                                                   # a Linear failure is a warning and never blocks the start.
-  pipeline wt [NAME] [--detach] [--from REF]     # the one way to create a worktree by hand: prints <repo>-wt, or creates
+  pipeline wt [NAME] [--detach] [--from REF] [--on ISSUE]
+                                                  # --on: a new worktree stacked on an in-flight blocker whose checks
+                                                  # passed (see "Stacked starts"). Otherwise:
+                                                  # the one way to create a worktree by hand: prints <repo>-wt, or creates
                                                   # <repo>-wt/<NAME> if missing (branch maxxfactory/<NAME> from the project
                                                   # branch; --detach for a scratch checkout: a suite, a plan review) and
                                                   # prints its path. Worktrees live next to the repo, in <repo>-wt, nowhere else.
@@ -47,7 +50,23 @@ bin/review), and the pipeline's own bookkeeping (`tries`, `merges`, `why`, `stuc
              `STATUS: blocked`; or a round changed nothing twice (the second run one tier up). The coordinator settles
              it (`pipeline fix`, or merge).
   stuck      a step failed beyond its retries: CRITICAL alert, the coordinator looks, then `pipeline retry`.
+  stacked    a ticket started on its unmerged blocker (see "Stacked starts") whose own review approved before the
+             blocker was merged: it waits here; once the blocker is in `done` the stack commit is dropped
+             (rebase-wt, STACK_DROP=1) and the full checks run once on the result (stage final), then approved.
 Any other stage (plan, hold, ...) is left alone. triage and stuck tickets are listed in attention.txt.
+Stacked starts (2026-11-25, `stack`, on by default): tokens are spent in parallel, never in series. A ticket whose only
+open blocker is in flight with its checks passed (in review, final, stacked or approved) does not wait for that
+blocker's review: its worktree is created on a snapshot of the blocker's worktree, one commit `maxxfactory-stack
+<BLOCKER> r<n>` on top of the blocker's branch (`pipeline wt <ISSUE> --on <BLOCKER>`; `auto_start` does it by itself).
+The ticket's own diff (review base, changed files) starts at that commit. Nothing unreviewed reaches the project
+branch: the ticket is never approved nor merged before its blocker is merged, the stack commit is dropped then, and
+what the blocker's fix rounds changed meets the ticket's work in that rebase (a conflict is a merge round).
+Express lane (2026-11-25): a ticket listed in state.json `lanes` as `express` (written by `bin/milestone add` for a
+small change with no risk flag) is implemented by a Tier 1 model (role express_implement, every round) and each
+review is two Tier 1 reviewers of two vendors, none the implementer's, in parallel (role express_review).
+New worktrees get the dependency directories of the main checkout (`clone_dirs`, default node_modules) as a
+copy-on-write clone when the lockfiles next to them are identical; the `setup` command then sees
+MAXXFACTORY_DEPS_CLONED=1 and can skip its install.
 Fix rounds go through `run-model run implement --role fix` with the brief <ISSUE>-impl-<n>.md, so run-model's
 automatic escalation after round 3 applies. Every fix brief ends with the rule that the full checks must pass.
 `pipeline start` refuses a ticket whose state.json `blockers` are not all in `done` (`--force` overrides).
@@ -84,8 +103,11 @@ DEFAULTS = {'interval': 60, 'max_jobs': 3, 'max_rounds': 5, 'max_merges': 3, 're
             # A run never parks on a coordinator that is silent (out of quota, compacting, turn ended):
             'max_grants': 3,          # file requests of one ticket the loop grants by itself (0: all go to triage)
             'reserved_paths': '',     # regex of paths the loop never grants (e.g. `(^|/)package(-lock)?\\.json$`)
-            'attention_minutes': 20}  # triage, stuck or approved left unanswered this long: CRITICAL alert (0: never)
-DRIVEN = ('implement', 'merge', 'rebase', 'review', 'final')
+            'attention_minutes': 20,  # triage, stuck or approved left unanswered this long: CRITICAL alert (0: never)
+            'stack': True,            # a ticket starts on its one unmerged blocker once that blocker's checks passed
+            'clone_dirs': 'node_modules'}  # dependency dirs cloned (copy-on-write) from the main checkout into a new worktree
+DRIVEN = ('implement', 'merge', 'rebase', 'review', 'final', 'stacked')
+LOCKFILES = ('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock', 'npm-shrinkwrap.json')
 SHARED = re.compile(r'(^|/)(tests?|__tests__|docs)(/|$)|\.(test|spec)\.|(^|/)test_[^/]*\.py$|_test\.py$')
 GRACE = 90  # seconds before a run or job with no process and no result counts as dead (dispatch races)
 MARK = '@@pipeline '  # marker lines of a .check file; check output never starts with it
@@ -302,7 +324,7 @@ def tree_changed(wt, branch):
     """True when the worktree differs from the project branch (uncommitted or untracked work, or commits of its own)."""
     if lib.git(wt, 'status', '--porcelain', '--untracked-files=normal').stdout.strip():
         return True
-    ahead = lib.git(wt, 'rev-list', '--count', '%s..HEAD' % branch).stdout.strip()
+    ahead = lib.git(wt, 'rev-list', '--count', '%s..HEAD' % (lib.stack_commit(wt, branch) or branch)).stdout.strip()
     return ahead not in ('', '0')
 
 
@@ -344,7 +366,7 @@ def changed_files(wt, branch):
     acceptance needs), so what a ticket in flight really changed counts with its `Touches` when tickets are kept apart."""
     if not os.path.isdir(wt):
         return set()
-    base = lib.git(wt, 'merge-base', branch, 'HEAD').stdout.strip() or 'HEAD'
+    base = lib.stack_commit(wt, branch) or lib.git(wt, 'merge-base', branch, 'HEAD').stdout.strip() or 'HEAD'
     names = lib.git(wt, 'diff', '--name-only', base).stdout.splitlines()
     names += lib.git(wt, 'ls-files', '-o', '--exclude-standard').stdout.splitlines()
     return {p.strip() for p in names if p.strip() and not SHARED.search(p.strip())}
@@ -442,9 +464,123 @@ def mkbrief(kind, t, n, wt, findings=None):
 def run_args(t, v):
     """(run name, extra run-model args) of the ticket's current round: the run name is the brief and output basename."""
     r = rnd(v)
+    express = v.get('lane') == 'express'  # Express lane: a Tier 1 implementer in every round, never escalated
     if v.get('stage') == 'merge' or (v.get('stage') == 'stuck' and v.get('stuck_from') == 'merge'):
-        return '%s-impl-%sm%s' % (t, r, v.get('merges', 1)), ['--role', 'fix', '--no-escalate']
+        return '%s-impl-%sm%s' % (t, r, v.get('merges', 1)), ['--role', 'express_implement' if express else 'fix', '--no-escalate']
+    if express:
+        return '%s-impl-%s' % (t, r), ['--role', 'express_implement']
     return '%s-impl-%s' % (t, r), (['--role', 'fix'] if r > 1 else [])
+
+
+def lane_of(st, t):
+    """The lane `bin/milestone add` recorded for the ticket (state.json `lanes`), or None."""
+    return (st.get('lanes') or {}).get(t)
+
+
+# ---------- stacked starts and cloned dependencies ----------
+
+def stack_of(v):
+    s = (v or {}).get('stack')
+    return s if isinstance(s, dict) and s.get('on') else None
+
+
+def stack_waits(st, v):
+    """The blocker a stacked ticket still waits for (not merged yet), or None."""
+    s = stack_of(v)
+    return s['on'] if s and s['on'] not in st.get('done', []) else None
+
+
+def rb_env(st, v):
+    """Environment of a rebase-wt call: once the blocker a ticket was stacked on is merged, its stack commit is dropped."""
+    s = stack_of(v)
+    return env(STACK_DROP='1' if s and s['on'] in st.get('done', []) else None)
+
+
+def stackable(st, p):
+    """True when ticket `p` is in flight with the checks of its current round passed: a ticket it blocks may start on it."""
+    v = (st.get('inflight') or {}).get(p)
+    if not isinstance(v, dict) or not os.path.isdir(wt_of(st, p, v)):
+        return False
+    if v.get('stage') in ('final', 'stacked', 'approved'):
+        return True
+    return v.get('stage') == 'review' and 'CHECK_OK' in marks(check_path(p, rnd(v)))
+
+
+def stack_snapshot(st, p):
+    """A commit that holds the whole working state of ticket `p` (committed, uncommitted and untracked work), on top
+    of its branch, made without touching its worktree or index. Returns the sha."""
+    v = st['inflight'][p]; wt = wt_of(st, p, v)
+    idx = os.path.join(PD, 'stack-%s-%d.index' % (p, os.getpid()))
+    e = dict(env(), GIT_INDEX_FILE=idx, GIT_AUTHOR_NAME='autopilot', GIT_AUTHOR_EMAIL='autopilot@localhost',
+             GIT_COMMITTER_NAME='autopilot', GIT_COMMITTER_EMAIL='autopilot@localhost')
+
+    def g(*a):
+        q = subprocess.run(['git', '-C', wt] + list(a), capture_output=True, text=True, env=e, stdin=subprocess.DEVNULL)
+        if q.returncode:
+            raise Stop('stack on %s: git %s failed: %s' % (p, a[0], (q.stderr or q.stdout).strip()[-200:]))
+        return q.stdout.strip()
+    try:
+        g('read-tree', 'HEAD'); g('add', '-A')
+        return g('commit-tree', g('write-tree'), '-p', g('rev-parse', 'HEAD'), '-m', '%s%s r%s' % (lib.STACK_SUBJECT, p, rnd(v)))
+    finally:
+        if os.path.exists(idx):
+            os.remove(idx)
+
+
+def stacked_on(st, wt):
+    """The ticket named by the stack commit of a worktree, or None."""
+    sha = lib.stack_commit(wt, st['branch'])
+    if not sha:
+        return None
+    return lib.git(wt, 'log', '-1', '--format=%s', sha).stdout.strip()[len(lib.STACK_SUBJECT):].split(' ')[0] or None
+
+
+def open_blockers(st, t):
+    done = set(st.get('done', []))
+    return [b for b in (st.get('blockers') or {}).get(t, []) if b not in done]
+
+
+def clone_deps(wt, c):
+    """Copy-on-write clone of the dependency directories of the main checkout (`clone_dirs`) into a new worktree, when
+    the lockfiles next to each directory are byte-identical in both trees. A fresh install per worktree was most of a
+    small ticket's fixed cost. Never a plain copy: where the filesystem cannot clone, nothing is done and the `setup`
+    command installs as before. Returns the directories cloned."""
+    out = []
+    for d in [x.strip().strip('/') for x in str(c.get('clone_dirs') or '').split(',') if x.strip()]:
+        src, dst = os.path.join(M, d), os.path.join(wt, d)
+        if not os.path.isdir(src) or os.path.lexists(dst):
+            continue
+        par = os.path.dirname(d)
+        locks = [f for f in LOCKFILES if os.path.exists(os.path.join(M, par, f))]
+        if not locks or any(not os.path.exists(os.path.join(wt, par, f))
+                            or lib.file_digest(os.path.join(M, par, f)) != lib.file_digest(os.path.join(wt, par, f)) for f in locks):
+            continue
+        os.makedirs(os.path.dirname(dst) or wt, exist_ok=True)
+        for cmd in (['cp', '-c', '-R', src, dst], ['cp', '-R', '--reflink=always', src, dst]):
+            if subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL).returncode == 0:
+                out.append(d); break
+            subprocess.run(['rm', '-rf', dst], capture_output=True)
+    return out
+
+
+def add_worktree(st, t, c, on=None, ref=None, detach=False):
+    """Create <repo>-wt/<t> (branch maxxfactory/<t>) from the project branch, from `ref`, or stacked on the in-flight
+    ticket `on`. Returns (worktree, error or None, cloned dependency dirs)."""
+    wt = wt_of(st, t, {})
+    br = lib.ticket_branch(M, t)
+    exists = lib.git(M, 'rev-parse', '-q', '--verify', 'refs/heads/' + br).returncode == 0
+    if detach:
+        args = ['--detach', wt, ref or st.get('branch') or 'HEAD']
+    elif exists:
+        if on:
+            return wt, 'branch %s already exists: a stacked start needs a new worktree' % br, []
+        args = [wt, br]
+    else:
+        args = ['-b', br, wt, stack_snapshot(st, on) if on else (ref or st.get('branch') or 'HEAD')]
+    g = lib.git(M, 'worktree', 'add', '-q', *args)
+    if g.returncode:
+        return wt, (g.stderr or g.stdout).strip()[-300:], []
+    return wt, None, clone_deps(wt, c)
 
 
 def linear_in_progress(t):
@@ -537,7 +673,7 @@ def rebase(t, v, st, c):
     r, wt = rnd(v), wt_of(st, t, v)
     if jobs_running() >= c['max_jobs']:
         return  # stays in `rebase` until a check slot frees up (status: waiting for a check slot)
-    p = subprocess.run([tool('rebase-wt'), wt, st['branch']], capture_output=True, text=True, env=env(), stdin=subprocess.DEVNULL)
+    p = subprocess.run([tool('rebase-wt'), wt, st['branch']], capture_output=True, text=True, env=rb_env(st, v), stdin=subprocess.DEVNULL)
     out = (p.stdout + p.stderr).strip()
     if p.returncode == 0:
         start_job(t, r, wt, 'rebase')
@@ -606,7 +742,7 @@ def fix_round(t, v, st, c, body, src, expect='review', forced=False):
         drop_approved(t)
         lib.resolve_alert(M, 'pipeline_stuck', t)
         log('%s r%s: %s -> fix round %s%s' % (t, r, src, n, ' (Tier 2 by escalation)' if n > escalate_after() else ''))
-        dispatch(t, wt, '%s-impl-%s' % (t, n), ['--role', 'fix'])
+        dispatch(t, wt, *run_args(t, dict(v, round=n, stage='implement')))
 
 
 def escalate_after():
@@ -626,6 +762,14 @@ def approve(t, r, st=None, expect='review'):
     # `pipeline.skip_final` (owner opt-in): merge on the reviewed fast checks; the coordinator runs the full suite
     # once on the project branch per batch of merges instead of once per ticket.
     skip_final = bool((st.get('pipeline') or {}).get('skip_final'))
+    v = (st.get('inflight') or {}).get(t) or {}
+    waits = stack_waits(st, v)
+    if waits:
+        # Stacked on a blocker that is not merged yet: never approved before it. The full checks run after the stack
+        # commit is dropped (on_stacked), on the tree that will really be merged.
+        if transition(t, expect, r, stage='stacked', tries=0):
+            log('%s r%s: %s passed -> waits for %s to be merged (stacked)' % (t, r, 'review' if expect == 'review' else 'full checks', waits))
+        return
     if expect == 'review' and fast_checks_of(st, t) is not None and not skip_final:
         if os.path.exists(final_path(t, r)):
             os.remove(final_path(t, r))
@@ -699,6 +843,19 @@ def finals_running():
     return own_jobs(final=True) + STARTED[1]
 
 
+def on_stacked(t, v, st, c):
+    """A stacked ticket whose review approved: once its blocker is merged, drop the stack commit (on_final's rebase,
+    STACK_DROP=1) and run the full checks once on the result. A blocker that left the run without being merged
+    (dropped, stuck for good) leaves the ticket here: the coordinator settles it."""
+    if stack_waits(st, v):
+        return
+    r = rnd(v)
+    if os.path.exists(final_path(t, r)):
+        os.remove(final_path(t, r))
+    if transition(t, 'stacked', r, stage='final', tries=0):
+        log('%s r%s: %s merged -> stack dropped, full checks' % (t, r, stack_of(v)['on']))
+
+
 def on_final(t, v, st, c):
     """Approved by the review, two-level checks: the full suite once, `max_full_jobs` at a time. Pass -> approved;
     fail -> fix round with the output (the next round's review then sees only that fix)."""
@@ -710,7 +867,7 @@ def on_final(t, v, st, c):
             return  # waits for a full-check slot (status: final (slot))
         if lib.git(wt, 'rev-parse', '-q', '--verify', 'REBASE_HEAD').returncode == 0:
             stuck(t, 'final', r, 'a rebase is in progress in %s' % wt); return
-        p = subprocess.run([tool('rebase-wt'), wt, st['branch']], capture_output=True, text=True, env=env(), stdin=subprocess.DEVNULL)
+        p = subprocess.run([tool('rebase-wt'), wt, st['branch']], capture_output=True, text=True, env=rb_env(st, v), stdin=subprocess.DEVNULL)
         out = (p.stdout + p.stderr).strip()
         if p.returncode == 3 or 'CONFLICT' in out:
             transition(t, 'final', r, stage='rebase')
@@ -844,6 +1001,8 @@ def tick():
                 rebase(t, v, st, c)
             elif v['stage'] == 'final':
                 on_final(t, v, st, c)
+            elif v['stage'] == 'stacked':
+                on_stacked(t, v, st, c)
             else:
                 on_review(t, v, st, c)
         except Stop as e:
@@ -944,7 +1103,7 @@ def auto_merge(st, c):
     """`auto_merge`: an approved ticket (full checks passed) is merged by the loop: no wait for the coordinator.
     A conflict goes back to a merge round (cmd_merge); any other failure twice -> stuck."""
     for t, v in list(st.get('inflight', {}).items()):
-        if not isinstance(v, dict) or v.get('stage') != 'approved':
+        if not isinstance(v, dict) or v.get('stage') != 'approved' or stack_waits(st, v):
             continue
         subj = '%s: %s [%s]' % (c['merge_prefix'], ticket_title(t), t)
         body = 'Approved in round %s; full checks passed. Merged by the pipeline (auto_merge).' % rnd(v)
@@ -966,7 +1125,9 @@ def auto_merge(st, c):
 def auto_start(st, c):
     """`auto_start`: queued tickets whose blockers are all merged (state.json `done`) and whose `Touches` overlap
     neither the `Touches` nor the really changed files of a ticket in flight start by themselves, in queue order, up to `target_inflight`. The worktree is created
-    from the project branch; `setup` runs in it before round 1, in the background."""
+    from the project branch; `setup` runs in it before round 1, in the background. With `stack` (default), a ticket
+    whose one open blocker is in flight with its checks passed starts on a snapshot of that blocker's worktree (see
+    "Stacked starts"); the blocker's own files do not count as busy for it."""
     inf = st.get('inflight', {})
     target = int(c['target_inflight'] or 2 * int(c['max_jobs']))
     room = target - len(inf)
@@ -974,31 +1135,37 @@ def auto_start(st, c):
         return
     done, blocked = set(st.get('done', [])), set(st.get('blocked') or [])
     owner = lib.owner_waits(st)  # a ticket that waits on the owner never starts by itself
-    busy = set()
-    for t in inf:
-        busy |= touches_of(t) | changed_files(wt_of(st, t, inf[t]), st['branch'])
+    own = {t: touches_of(t) | changed_files(wt_of(st, t, inf[t]), st['branch']) for t in inf}
+    busy = set().union(*own.values()) if own else set()
     for t in st.get('queue', []):
         if room <= 0:
             break
         if t in inf or t in done or t in blocked or t in owner or not os.path.exists(ticket_file(t)):
             continue
-        if any(b not in done for b in (st.get('blockers') or {}).get(t, [])):
-            continue
+        ob = open_blockers(st, t)
+        on = None
+        if ob:
+            if not (c.get('stack') and len(ob) == 1 and stackable(st, ob[0]) and not os.path.isdir(wt_of(st, t, {}))):
+                continue
+            on = ob[0]
         tt = touches_of(t)
-        if overlaps(tt, busy):
+        if overlaps(tt, set().union(*([f for k, f in own.items() if k != on] or [set()])) if on else busy):
             continue
         wt = wt_of(st, t, {})
+        cloned = []
         if not os.path.isdir(wt):
-            br = lib.ticket_branch(M, t)
-            exists = lib.git(M, 'rev-parse', '-q', '--verify', 'refs/heads/' + br).returncode == 0
-            g = lib.git(M, 'worktree', 'add', '-q', *([wt, br] if exists else ['-b', br, wt, st['branch']]))
-            if g.returncode:
-                log('%s: auto start: worktree add failed: %s' % (t, (g.stderr or g.stdout).strip()[-200:])); continue
+            try:
+                wt, err, cloned = add_worktree(st, t, c, on=on)
+            except Stop as e:
+                err = str(e)
+            if err:
+                log('%s: auto start: worktree add failed: %s' % (t, err[-200:])); continue
         entry = {'wt': wt, 'round': 1, 'stage': 'starting', 'stage_at': lib.now().isoformat()}
         lib.update_state(M, lambda s, t=t, e=entry: s.setdefault('inflight', {}).__setitem__(t, e))
         cmd = '%s"%s" start %s' % (('(%s) && ' % c['setup']) if c['setup'] else '', SELF, t)
-        log('%s: auto start (%s)' % (t, wt))
-        spawn(['bash', '-c', 'cd "%s" && %s' % (wt, cmd)], out=os.path.join(OUT, t + '-start.log'))
+        log('%s: auto start (%s)%s%s' % (t, wt, (' stacked on %s' % on) if on else '', (' deps cloned: %s' % ', '.join(cloned)) if cloned else ''))
+        spawn(['bash', '-c', 'cd "%s" && %s' % (wt, cmd)], out=os.path.join(OUT, t + '-start.log'),
+              extra_env={'MAXXFACTORY_DEPS_CLONED': '1'} if cloned else None)
         busy |= tt
         room -= 1
 
@@ -1036,7 +1203,10 @@ def cmd_job(t, r, review_only, final=False):
         mark('REVIEW_ERROR ' + str(e)); mark('REVIEW_RC 98'); mark('DONE'); return
     mark('REVIEW_START ' + brief)
     with open(os.path.join(OUT, 'review-%s-%s.txt' % (t, r)), 'w') as rv:
-        rc = subprocess.run([tool('review'), t, str(r), brief, '1'], cwd=M, env=env(WT=wt, POOL=v.get('pool')),
+        # Express lane: the final diff is read by two Tier 1 reviewers of two vendors at once (bin/review runs them in parallel).
+        express = v.get('lane') == 'express'
+        rc = subprocess.run([tool('review'), t, str(r), brief, '2' if express else '1'], cwd=M,
+                            env=env(WT=wt, POOL=v.get('pool') or ('express_review' if express else None)),
                             stdin=subprocess.DEVNULL, stdout=rv, stderr=subprocess.STDOUT).returncode
     mark('REVIEW_RC %s' % rc); mark('DONE')
 
@@ -1070,25 +1240,28 @@ def cmd_wt(a):
     """The worktrees directory, or one worktree in it (created if missing). Never anywhere else."""
     st = lib.load_state(M)
     root = lib.worktrees_dir(M)
-    names = [x for i, x in enumerate(a) if not x.startswith('--') and (i == 0 or a[i - 1] != '--from')]
+    names = [x for i, x in enumerate(a) if not x.startswith('--') and (i == 0 or a[i - 1] not in ('--from', '--on'))]
     if not names:
         print(root); return
     name = names[0]
     if len(names) > 1 or '/' in name or name.startswith('.'):
         sys.exit('pipeline wt: NAME is one plain name (the worktree is %s/<NAME>)' % root)
     wt = os.path.join(root, name)
+    on = a[a.index('--on') + 1] if '--on' in a else None
+    if on and os.path.isdir(wt):
+        sys.exit('pipeline wt: %s exists already: --on creates a new worktree stacked on %s' % (wt, on))
+    if on and not stackable(st, on):
+        sys.exit('pipeline wt: %s cannot be stacked on %s: it is not in flight with the checks of its round passed' % (name, on))
     if not os.path.isdir(wt):
-        ref = a[a.index('--from') + 1] if '--from' in a else (st.get('branch') or 'HEAD')
-        br = lib.ticket_branch(M, name)
-        if '--detach' in a:
-            args = ['--detach', wt, ref]
-        elif lib.git(M, 'rev-parse', '-q', '--verify', 'refs/heads/' + br).returncode == 0:
-            args = [wt, br]
-        else:
-            args = ['-b', br, wt, ref]
-        g = lib.git(M, 'worktree', 'add', '-q', *args)
-        if g.returncode:
-            sys.exit('pipeline wt: worktree add failed: %s' % (g.stderr or g.stdout).strip()[-300:])
+        try:
+            wt, err, cloned = add_worktree(st, name, cfg(st), on=on, ref=a[a.index('--from') + 1] if '--from' in a else None,
+                                           detach='--detach' in a)
+        except Stop as e:
+            err, cloned = str(e), []
+        if err:
+            sys.exit('pipeline wt: worktree add failed: %s' % err)
+        if cloned:
+            print('deps cloned: %s (identical lockfile: no install needed)' % ', '.join(cloned), file=sys.stderr)
     print(wt)
 
 
@@ -1102,14 +1275,19 @@ def cmd_start(t, a):
                  % (wt, lib.worktrees_dir(M), t))
     if not os.path.exists(ticket_file(t)):
         sys.exit('pipeline start: no ticket file %s' % ticket_file(t))
-    done = set(st.get('done', []))
-    miss = [b for b in (st.get('blockers') or {}).get(t, []) if b not in done]
-    if miss and '--force' not in a:
-        sys.exit('pipeline start: %s is blocked by %s (not merged; --force to start anyway)' % (t, ', '.join(miss)))
+    miss = open_blockers(st, t)
+    on = stacked_on(st, wt)  # the worktree was created on an unmerged blocker (pipeline wt --on, auto_start)
+    if miss and miss != [on] and '--force' not in a:
+        hint = ('; once its checks pass: pipeline wt %s --on %s' % (t, miss[0])) if len(miss) == 1 else ''
+        sys.exit('pipeline start: %s is blocked by %s (not merged; --force to start anyway%s)' % (t, ', '.join(miss), hint))
     cur = st.get('inflight', {}).get(t) or {}
     if cur.get('stage') in DRIVEN + ('approved', 'merging'):
         sys.exit('pipeline start: %s is already in flight (stage %s, round %s)' % (t, cur['stage'], rnd(cur)))
     entry = dict(cur, wt=os.path.abspath(wt), round=1, stage='implement', stage_at=lib.now().isoformat(), tries=0)
+    if on:
+        entry['stack'] = {'on': on, 'at': lib.now().isoformat()}
+    if lane_of(st, t):
+        entry['lane'] = lane_of(st, t)
     if '--pool' in a:
         entry['pool'] = a[a.index('--pool') + 1]
     try:
@@ -1119,8 +1297,9 @@ def cmd_start(t, a):
     lib.update_state(M, lambda s: s.setdefault('inflight', {}).__setitem__(t, entry))
     log('%s r1: started (%s)' % (t, entry['wt']))
     linear_in_progress(t)
-    dispatch(t, entry['wt'], '%s-impl-1' % t, [])
-    print('STARTED %s round 1 in %s' % (t, entry['wt']))
+    dispatch(t, entry['wt'], *run_args(t, entry))
+    print('STARTED %s round 1 in %s%s%s' % (t, entry['wt'], (' (stacked on %s)' % on) if on else '',
+                                          ' (Express lane)' if entry.get('lane') == 'express' else ''))
 
 
 def cmd_fix(t, findings):
@@ -1186,6 +1365,8 @@ def cmd_merge(t, subj, body):
     if not os.path.isdir(wt):
         sys.exit('pipeline merge: no worktree %s' % wt)
     r = rnd(v or {})
+    if v and stack_waits(st, v):
+        sys.exit('pipeline merge: %s was started on %s, which is not merged yet: merge %s first' % (t, stack_waits(st, v), stack_waits(st, v)))
     if v:
         transition(t, None, None, stage='merging')
 
@@ -1198,7 +1379,7 @@ def cmd_merge(t, subj, body):
         merge_round(t, s2['inflight'][t], s2, cfg(s2), why)
 
     restore_foreign_notes(t, wt)
-    p = subprocess.run([tool('rebase-wt'), wt, br], capture_output=True, text=True, env=env(), stdin=subprocess.DEVNULL)
+    p = subprocess.run([tool('rebase-wt'), wt, br], capture_output=True, text=True, env=rb_env(st, v), stdin=subprocess.DEVNULL)
     out = (p.stdout + p.stderr).strip()
     if p.returncode:
         print(out[-1500:])
@@ -1216,7 +1397,7 @@ def cmd_merge(t, subj, body):
     print('\n'.join(fo.splitlines()[-4:]))
     if f.returncode == 3:
         lib.git(M, 'cherry-pick', '--abort')
-        p = subprocess.run([tool('rebase-wt'), wt, br], capture_output=True, text=True, env=env(), stdin=subprocess.DEVNULL)
+        p = subprocess.run([tool('rebase-wt'), wt, br], capture_output=True, text=True, env=rb_env(st, v), stdin=subprocess.DEVNULL)
         back_to_merge_round('cherry-pick onto %s conflicted (aborted):\n%s\n\nrebase of the worktree:\n%s' % (br, fo[-800:], (p.stdout + p.stderr)[-1200:]))
         print('MERGE-CONFLICT %s: cherry-pick aborted, the ticket is back to a merge round' % t); sys.exit(3)
     if f.returncode not in (0, 4):
@@ -1288,6 +1469,8 @@ def detail(t, v):
     if s == 'final':
         mk = marks(final_path(t, r))
         return 'full checks' if mk and 'DONE' not in mk else ('final (slot)' if not mk else 'final done')
+    if s == 'stacked':
+        return 'waits for %s' % (stack_of(v) or {}).get('on', '?')
     return s
 
 

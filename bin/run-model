@@ -22,12 +22,14 @@ model's CLI, stores the full output in a file and prints ONE json line.
 
 Tier policy (lib "tier policy"): a run takes a role, and the role allows levels: implement and
 fix Tier 3, --escalate Tier 2 (logged in state.json `escalations`), review Tier 2, plan_review / premortem /
-milestone_review Tier 1, trivial Tier 4. Escalation is automatic (at most one implementation
+milestone_review Tier 0 first, then Tier 1 when no Tier 0 model is eligible and healthy (logged on stderr and in
+state.json `tier_fallbacks`; models.json `"plan_tier0": false` keeps them on Tier 1), express_implement and
+express_review Tier 1 (the Express lane of bin/pipeline), trivial Tier 4. Escalation is automatic (at most one implementation
 and two fixes by a cheap model per ticket): an implement or fix run whose round (--round N, else the brief or output
 name `<ISSUE>-impl-<n>.md`) is above models.json `escalate_after_round` (default 3) runs as --escalate; --no-escalate
 keeps the role's own tier for a mechanical merge-only round. Legacy pool names are role aliases. There is no ordered pool: the candidates
 of the role are drawn at random weighted by the credit left on each account (paid before free), the coordinator's own
-account last and quota-guarded. `--model` outside the role's tier is refused (exit 4), Tier 0 only with --allow-tier0,
+account last and quota-guarded. `--model` outside the role's tier is refused (exit 4); outside the plan roles Tier 0 runs only with --allow-tier0,
 an `excluded` or `reserved` entry never runs, an entry that breaks vendor -> CLI is refused.
 
 Hard rules enforced here:
@@ -361,9 +363,9 @@ def cmd_run(args):
     r = lib.load_reg(); ad = lib.adapters()
     role, rnd = run_role(r, args, kind, brief, out)
     if '--allow-mid' in args or os.environ.get('ALLOW_MID') == '1':
-        refuse(role, issue, 'ALLOW_MID / --allow-mid was removed by the tier policy: plan reviews and pre-mortems are Tier 1 only. Wait (`run-model wait plan_review`) and tell the owner when it lasts')
+        refuse(role, issue, 'ALLOW_MID / --allow-mid was removed by the tier policy: plan reviews and pre-mortems are Tier 0, then Tier 1, never lower. Wait (`run-model wait plan_review`) and tell the owner when it lasts')
     if kind == 'review' and role not in lib.REVIEW_ROLES:
-        refuse(role, issue, 'a review takes role review (Tier 2) or a plan role (Tier 1); %s never reviews' % role)
+        refuse(role, issue, 'a review takes role review (Tier 2), express_review (Tier 1) or a plan role (Tier 0, then Tier 1); %s never reviews' % role)
     if kind == 'implement' and role in lib.REVIEW_ROLES:
         refuse(role, issue, 'role %s reviews, it never implements' % role)
     ex_vendors = [v for v in (args[args.index('--exclude-vendor') + 1] if '--exclude-vendor' in args else '').split(',') if v]
@@ -403,8 +405,8 @@ def cmd_run(args):
         exr = lib.excluded_reason(r, k, m, a)
         if exr: refuse(role, issue, '%s is excluded: %s' % (k, exr), model=k)
         lv = lib.level_of(r, m, a)
-        if lv == 0 and '--allow-tier0' not in args:
-            refuse(role, issue, '%s is Tier 0: never selected without the owner opt-in --allow-tier0' % k, model=k)
+        if lv == 0 and 0 not in levels and '--allow-tier0' not in args:
+            refuse(role, issue, '%s is Tier 0: outside the plan roles it is never selected without the owner opt-in --allow-tier0' % k, model=k)
         if lv != 0 and lv not in levels:
             refuse(role, issue, '%s is Tier %s; role %s takes Tier %s only' % (k, lv, role, '/'.join(map(str, levels))), model=k)
         if k in excluded:
@@ -448,6 +450,13 @@ def cmd_run(args):
                 print(json.dumps({'status': 'error', 'role': role, 'reason': 'implement runs need a ticket identity: --issue <ID> or a brief named <ISSUE>-impl-<n>.md inside a project with .maxxfactory/state.json'})); sys.exit(4)
             lib.record_implementer(repo, issue, k, m, a or lib.adapter_of(m))
         acct = lib.account_key(m, a)
+        if role in lib.PLAN_ROLES and 0 in levels and lib.level_of(r, m, a) != 0:
+            # Planning is Tier 0 first: a lower tier runs only when no Tier 0 model is eligible, and it is logged.
+            print('run-model: tier fallback: %s by %s (Tier %s): no eligible Tier 0 model of another vendor than the planner'
+                  % (role, k, lib.level_of(r, m, a)), file=sys.stderr)
+            if repo:
+                lib.update_state(repo, lambda st: st.setdefault('tier_fallbacks', []).append(
+                    {'at': now().isoformat(), 'role': role, 'issue': issue, 'model': k, 'level': lib.level_of(r, m, a)}))
         lib.update_reg(lambda rr: rr.setdefault('last_used', {}).__setitem__(acct, now().isoformat()))
         res = run_one(r, k, 'implement' if kind == 'implement' else 'review', brief, out, cwd); tried.append(f"{k}:{res['status']}")
         res['level'] = lib.level_of(r, m, a); res['run_role'] = role

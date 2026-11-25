@@ -373,7 +373,16 @@ def summary(r, ad):
         cv = cv or {lib.vendor_of({'cli': ca[0], 'model': ''}, ad[ca[0]])} if ad.get(ca[0]) else cv
         t1 = {lib.vendor_of(r['models'][k], ad[r['models'][k]['cli']]) for k in lib.candidates(r, 'plan_review', ad)} - cv
         if not t1:
-            probs.append('no Tier 1 model of another vendor than the coordinator (%s): plan reviews and pre-mortems cannot run' % ', '.join(sorted(cv)))
+            probs.append('no Tier 0 or Tier 1 model of another vendor than the coordinator (%s): plan reviews and pre-mortems cannot run' % ', '.join(sorted(cv)))
+    # Planning is Tier 0 first, and the Express lane is Tier 1 work (2026-11-25): say what each can run on.
+    if 0 in lib.roles(r)['plan_review'] and not any(lib.level_of(r, r['models'][k], ad[r['models'][k]['cli']]) == 0 for k in lib.candidates(r, 'plan_review', ad)):
+        probs.append('no Tier 0 model in the roster: planning reviews run on Tier 1 (logged as a tier fallback); add a Tier 0 subscription, or set "plan_tier0": false to make Tier 1 the rule')
+    xi = [k for k in lib.candidates(r, 'express_implement', ad) if not r['models'][k].get('no_implement')]
+    if not xi:
+        probs.append('no Tier 1 model may implement (every one is flagged no_implement): an Express change cannot be written; remove `no_implement` from the entries that may, in models.json')
+    xv = {lib.vendor_of(r['models'][k], ad[r['models'][k]['cli']]) for k in lib.candidates(r, 'express_review', ad)}
+    if len(xv) < 3:
+        probs.append('Tier 1 has %d vendor(s) (%s): an Express review takes two vendors other than the implementer\'s, so three are needed' % (len(xv), ', '.join(sorted(xv)) or 'none'))
     unknown = sorted({lib.account_key(m, ad[m['cli']]) for k, m in r['models'].items() if ad.get(m['cli']) and not lib.excluded_reason(r, k, m, ad[m['cli']])
                       and m.get('subscription') in (None, 'paid?')})
     if unknown:

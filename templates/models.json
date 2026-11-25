@@ -25,12 +25,15 @@
       2
     ],
     "plan_review": [
+      0,
       1
     ],
     "premortem": [
+      0,
       1
     ],
     "milestone_review": [
+      0,
       1
     ],
     "coordinate": [
@@ -40,7 +43,7 @@
       4
     ]
   },
-  "roles_doc": "role -> levels. Bounded by the policy in code: implement/fix Tier 3, review Tier 2 (Tier 1 as bin/review's logged backup when no Tier 2 reviewer is eligible), plan_review/premortem/milestone_review/coordinate Tier 1, trivial Tier 4 (or 3); `--escalate` (automatic past `escalate_after_round`) = one level above implement, never Tier 1; Tier 0 never automatic.",
+  "roles_doc": "role -> levels. Bounded by the policy in code: implement/fix Tier 3, review Tier 2 (Tier 1 as bin/review's logged backup when no Tier 2 reviewer is eligible), plan_review/premortem/milestone_review Tier 0 first, then Tier 1 when no Tier 0 model of another vendor than the planner is eligible (logged; `\"plan_tier0\": false` keeps them on Tier 1), coordinate Tier 1, express_implement/express_review Tier 1 (the Express lane; fixed by the code, not listed here), trivial Tier 4 (or 3); `--escalate` (automatic past `escalate_after_round`) = one level above implement, never Tier 1; Tier 0 never automatic outside the plan roles.",
   "subscription_doc": "per entry, set by /maxxfactory-init after asking the owner (never a default): paid (a plan the owner pays for), paid? (paid, plan not confirmed), free (free plan, low limits), reserved (kept for other uses: never selected; `bin/harness subscription <cli> <account> reserved --reason ...`). `excluded: <reason>` removes one entry; a project's state.json `exclude` removes keys or whole accounts for that project only. Draw weights: paid 1, paid? or unset 0.7, free 0.25, times the credit left on the account. The coordinator's own account is not configured here: it is detected per session (adapter `coordinator_env`, `bin/run-model whoami`) and protected (last resort, cheap roles, `coordinator_reserve`).",
   "tier_table": [],
   "tier_table_doc": "owner overrides of the built-in tier table (bin/autopilot_lib.py DEFAULT_TIER_TABLE, Nov 2026), first match wins: [{\"match\": \"<regex on the model id>\", \"level\": n}]",

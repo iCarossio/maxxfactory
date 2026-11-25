@@ -185,8 +185,23 @@ check "a Mistral model is Tier 4 whatever its level" "$(POOL trivial | SORTED) $
 check "tier table: GLM 5.4 on a Z.ai coding plan is Tier 2; plain GLM elsewhere stays Tier 1, Flash Tier 2" "$(python3 -c "import sys;sys.path.insert(0,'$H/bin');import autopilot_lib as l;print(*[l.table_level({},x)[0] for x in ('zai-coding-plan/glm-5.4','zai-coding-plan/glm-5.3','opencode-go/glm-5.4','zai-coding-plan/glm-5.3-flash')])")" "2 1 1 2"
 check "Mistral Large is Tier 2 (tier table)" "$(python3 -c "import sys;sys.path.insert(0,'$H/bin');import autopilot_lib as l;print(l.table_level({},'mistral-large-4-0-3')[0], l.forced_four({'cli':'vibe','model':'mistral-large-4-0-3','vendor':'mistral'}), l.forced_four({'cli':'vibe','model':'mistral-medium-3.5','vendor':'mistral'}))")" "2 None Mistral model"
 $H/bin/harness add-model fk-z --cli claude --model claude-mythos-x --level 0 >/dev/null
-check "Tier 0 never in a pool" "$(for p in implement fix review plan_review premortem milestone_review escalate trivial coordinate; do POOL $p; done | grep -c fk-z)" "0"
-$H/bin/run-model run review "$PB" .autopilot/out/p.md --cwd "$PWD" --pool plan_review --model fk-z >/dev/null 2>&1; check "Tier 0 by --model without --allow-tier0 refused" "$?" "4"
+FIRSTOF() { POOL $1 | python3 -c "import json,sys;print(json.load(sys.stdin)[0])"; }
+check "Tier 0 only in the plan roles (planning is Tier 0), never in another pool" "$(for p in implement fix review escalate trivial coordinate express_implement express_review; do POOL $p; done | grep -c fk-z) $(for p in plan_review premortem milestone_review; do POOL $p; done | grep -c fk-z)" "0 3"
+check "a plan role draws every Tier 0 before the first Tier 1 (10 seeds)" "$(for i in 1 2 3 4 5 6 7 8 9 10; do AUTOPILOT_SEED=$i FIRSTOF plan_review; AUTOPILOT_SEED=$i FIRSTOF premortem; done | sort -u | tr '\n' ' ')" "fk-z "
+python3 -c "import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['plan_tier0']=False;json.dump(r,open(p,'w'))"
+check "plan_tier0 false keeps the plan roles on Tier 1" "$(POOL plan_review | grep -c fk-z) $(LV "$(POOL plan_review)")" "0 [1]"
+python3 -c "import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r.pop('plan_tier0');json.dump(r,open(p,'w'))"
+check "a roster written before the change (plan roles listed as [1]) gets Tier 0 in front" "$(python3 -c "import os,sys;sys.path.insert(0,os.environ['H']+'/bin');import autopilot_lib as l;r={'roles':{'plan_review':[1],'premortem':[1]}};print(l.roles(r)['plan_review'], l.roles(r)['premortem'], l.roles(r)['express_review'], l.roles(dict(r,plan_tier0=False))['plan_review'])")" "[0, 1] [0, 1] [1] [1]"
+$H/bin/run-model run review "$RB" .autopilot/out/p.md --cwd "$PWD" --pool review --model fk-z >/dev/null 2>&1; check "Tier 0 by --model outside the plan roles, without --allow-tier0, refused" "$?" "4"
+R=$($H/bin/run-model run review "$PB" .autopilot/out/pz.md --cwd "$PWD" --pool plan_review 2>$SCR/tf.err | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['status'],d['level'],d['model'] not in ('fk-a','fk-z'))")
+check "plan review: the only Tier 0 is the planner's vendor -> Tier 1 of another vendor, logged" "$R $(grep -c '^run-model: tier fallback: plan_review by fk-[a-z0-9]* (Tier 1)' $SCR/tf.err) $($H/bin/state get tier_fallbacks | python3 -c "import json,sys;e=json.load(sys.stdin)[-1];print(e['role'],e['level'])")" "ok 1 True 1 plan_review 1"
+B2=$($H/bin/mkbrief impl T-2 1 .autopilot/tickets/T-1.md)
+R=$(FAKE_BEHAVIOUR=implement $H/bin/run-model run implement "$B2" .autopilot/out/T-2-impl-1.md --cwd "$PWD" --role express_implement 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['status'],d['level'],d['run_role'],d['model'] not in ('fk-a','fk-b'))"); git checkout -q -- tracked.txt
+check "Express: implemented by a Tier 1 model (role express_implement), never one flagged no_implement (fk-a, fk-b)" "$R" "ok 1 express_implement True"
+FAKE_BEHAVIOUR=implement $H/bin/run-model run implement "$B2" .autopilot/out/T-2-impl-1.md --cwd "$PWD" --role express_implement --model fk-f >/dev/null 2>&1; check "Express: a Tier 2 implementer refused" "$?" "4"
+git checkout -q -- tracked.txt
+check "Express: reviewers are Tier 1 only" "$(LV "$(POOL express_review)")" "[1]"
+$H/bin/state del implementers.T-2 >/dev/null 2>&1
 B2=$($H/bin/mkbrief impl T-2 1 .autopilot/tickets/T-1.md)
 FAKE_BEHAVIOUR=implement $H/bin/run-model run implement "$B2" .autopilot/out/T-2-impl-1.md --cwd "$PWD" --model fk-f >/dev/null 2>&1; check "implement by a Tier 2 model refused" "$?" "4"
 FAKE_BEHAVIOUR=implement $H/bin/run-model run implement "$B2" .autopilot/out/T-2-impl-1.md --cwd "$PWD" --model fk-e --role trivial >/dev/null 2>&1; check "Tier 4 runs a trivial task" "$?" "0"
@@ -739,6 +754,7 @@ check "linear import --dry-run: non-atomic refused before any request" "$RC $(ec
 # milestone add: validation, dry run, approval stop, then the approved run.
 cat > $SCR/ext.json <<'EOF'
 {"id": "ext", "name": "Extension", "description": "Adds the API and its UI.", "why": "the owner extends the project",
+ "rehearsal": {"cmd": "git rm -r api && make test", "result": "3 tests of tests/test_api.py fail"},
  "kpis": [{"id": "X1", "kpi": "API answers", "target": "200 on /health", "measure": "curl -f localhost:8000/health"}],
  "tickets": [{"slug": "api", "title": "API", "estimate": "M", "touches": ["api/app.py"], "blocked_by": ["ENG-3"]},
              {"slug": "ui", "title": "UI", "estimate": 1, "touches": ["web/src/ui/"], "blocked_by": ["api", "ENG-4"]}]}
@@ -839,6 +855,7 @@ N=$(NCALLS); MS add $SPEC --approved --by owner --source 'user:"go"' >/dev/null 
 # milestone add with "into": tickets added to an existing milestone (no KPI, no pre-mortem, plan review, approval).
 cat > $SCR/into.json <<'EOF'
 {"into": "ext", "id": "ext-qa", "name": "QA pass", "description": "QA of the UI.", "why": "the owner adds a QA ticket",
+ "rehearsal": {"skipped": "a QA run changes no file"},
  "tickets": [{"slug": "qa-ui", "title": "QA the UI", "estimate": "S", "touches": ["web/tests/qa/"], "blocked_by": ["ui"]}]}
 EOF
 INTO() { python3 -c "import json;s=json.load(open('$SCR/into.json'));$1;json.dump(s,open('$SCR/into-bad.json','w'))"; MS add $SCR/into-bad.json --dry-run 2>&1 | grep -c "$2"; }
@@ -862,6 +879,55 @@ IDEA promote ENG-70 --into nope --id x1 >/dev/null 2>&1; check "idea promote --i
 python3 -c "import json;p='$SPEC2';s=json.load(open(p));[t.update(description='do it') for t in s['tickets']];json.dump(s,open(p,'w'))"
 OUT=$(MS add $SPEC2 --skip-review "test" --approved --by owner --source 'user:"schedule it"' 2>&1); RC=$?
 check "promote --into: idea closed into a ticket of the existing milestone" "$RC $(J $MR/.autopilot/state.json "len([m for m in d['milestones'] if m['id']=='ext'][0]['issues']), [x['id'] for x in [m for m in d['milestones'] if m['id']=='ext'][0]['additions']], d['ideas']['issues']") $(grep -c '~~private locations~~ promoted to Extension' $MR/PLAN.md)" "0 4 ['ext-qa', 'ext-ideas'] [] 1"
+# lanes: the work is sized before anything else; the lane decides the steps. Rehearsal before any review.
+LANE() { python3 -c "
+import json,os,sys;sys.path.insert(0,os.environ['H']+'/bin');import autopilot_lib as l
+T=lambda **k: dict(dict(slug='a',title='x',description='do it',touches=['a']),**k)
+s=eval(sys.argv[1]);r=l.spec_lane(s);print(r['lane'], len(r['errors']), ','.join(r['risk']) or '-')" "$1"; }
+check "lane: a spec that declares no risk list is Full (as before lanes)" "$(LANE "{'tickets':[T(lines=10)]}")" "full 0 -"
+check "lane: small, sized, no risk -> Express; mechanical lines do not count" "$(LANE "{'risk':[],'tickets':[T(lines=500),T(slug='b',mechanical=True,lines=5000)]}")" "express 0 -"
+check "lane: over 600 non-mechanical lines, or a ticket without lines -> Standard" "$(LANE "{'risk':[],'tickets':[T(lines=350),T(slug='b',lines=350)]}") $(LANE "{'risk':[],'tickets':[T()]}")" "standard 0 - standard 0 -"
+check "lane: more than 5 tickets -> Full" "$(LANE "{'risk':[],'tickets':[T(slug=str(i)) for i in range(6)]}")" "full 0 -"
+check "lane: a declared risk flag forces Full, and a lighter lane is refused" "$(LANE "{'risk':['payments'],'tickets':[T(lines=10)]}") $(LANE "{'risk':['payments'],'lane':'express','lane_why':'small','tickets':[T(lines=10)]}")" "full 0 payments full 1 payments"
+check "lane: a risk found in the text counts unless cleared with a reason" "$(LANE "{'risk':[],'description':'rotate the API key','tickets':[T(lines=10)]}") $(LANE "{'risk':[],'risk_cleared':{'secrets':'the key is only named in a comment'},'description':'rotate the API key','tickets':[T(lines=10)]}")" "full 0 secrets express 0 -"
+check "lane: heavier by choice always; lighter needs lane_why" "$(LANE "{'risk':[],'lane':'full','tickets':[T(lines=10)]}") $(LANE "{'risk':[],'lane':'express','tickets':[T(lines=350),T(slug='b',lines=350)]}") $(LANE "{'risk':[],'lane':'express','lane_why':'one concern','tickets':[T(lines=350),T(slug='b',lines=350)]}")" "full 0 - standard 1 - express 0 -"
+check "ticket shape: a mechanical ticket has no size or touches cap; 401 real lines are refused" "$(python3 -c "
+import os,sys;sys.path.insert(0,os.environ['H']+'/bin');import autopilot_lib as l
+T=lambda **k: dict(dict(slug='a',title='x',description='do it',touches=['a']),**k)
+print(len(l.ticket_shape_errors([T(mechanical=True,estimate='XL',touches=[str(i) for i in range(30)])])), len(l.ticket_shape_errors([T(lines=401)])), len(l.ticket_shape_errors([T(lines=400,mechanical_lines=9000)])))")" "0 1 0"
+cat > $SCR/xp.json <<'EOF'
+{"into": "ext", "id": "ext-xp", "name": "Small change", "description": "Hide the placeholder rows.", "why": "the owner asks for a small change", "risk": [],
+ "tickets": [{"slug": "xp-a", "title": "Loader", "description": "Do a.\nCHECKS: true", "estimate": "S", "lines": 120, "touches": ["src/load.ts"]},
+             {"slug": "xp-b", "title": "Repoint", "description": "Do b.\nCHECKS: test 1 = 1", "estimate": "S", "mechanical": true, "lines": 900, "touches": ["web/tests/"], "blocked_by": ["xp-a"]}]}
+EOF
+OUT=$(MS add $SCR/xp.json --dry-run 2>&1); RC=$?
+check "add --dry-run: the lane first, with the ETA of every lane the spec could take" "$RC $(echo "$OUT" | grep -c '^Lane: express (120 non-mechanical lines (max 600), no risk flag). Size: 2 tickets, 120 non-mechanical lines, 900 mechanical.') $(echo "$OUT" | grep -cE '^  -> express +1 ticket in 1 stage') $(echo "$OUT" | grep -cE '^     (standard|full) +2 tickets in 2 stage') $(echo "$OUT" | grep -c 'warning: no "rehearsal" yet')" "0 1 1 2 1"
+MS proposed --drop ext-xp >/dev/null 2>&1
+OUT=$(MS add $SCR/xp.json 2>&1); check "add: refused without a rehearsal (facts before any review or Express approval)" "$? $(echo "$OUT" | grep -c 'the spec has no "rehearsal"')" "1 1"
+python3 -c "import json;p='$SCR/xp.json';s=json.load(open(p));s['rehearsal']={'cmd':'rm data/*.json && npm test','result':'24 test files fail'};json.dump(s,open(p,'w'))"
+N=$(NCALLS); OUT=$(FAKE_BEHAVIOUR=auto MS add $SCR/xp.json 2>&1); RC=$?
+check "Express: no pre-mortem, no plan review, still stops for the owner's approval" "$RC $(echo "$OUT" | grep -c 'pre-mortem of milestone\|plan review of milestone') $(echo "$OUT" | grep -c '^--- review: SKIPPED (Express lane') $(echo "$OUT" | grep -c '^--- premortem: SKIPPED') $(ls $MR/.autopilot/plan/milestones/ext-xp/ | grep -c 'review-input\|premortem')" "3 0 1 1 0"
+OUT=$(MS add $SCR/xp.json --approved --by owner --source 'user:"go"' 2>&1); RC=$?
+XPI=$(J $MR/.autopilot/state.json "[m for m in d['milestones'] if m['id']=='ext'][0]['issues'][-1]")
+check "Express --approved: the tickets become the steps of one ticket, recorded in state lanes" "$RC $(J $MR/.autopilot/state.json "len([x for x in [m for m in d['milestones'] if m['id']=='ext'][0]['additions'] if x['id']=='ext-xp'][0]['issues']), d['lanes']['$XPI']") $(grep -c '^## Step [12]: ' $MR/.autopilot/tickets/$XPI.md) $(grep -c '^CHECKS: (true) && (test 1 = 1)$' $MR/.autopilot/tickets/$XPI.md) $(grep -c 'Rehearsal.*rm data' $MR/.autopilot/tickets/$XPI.md)" "0 1 express 2 1 1"
+check "Express: the lane and its reason are in the decision" "$(grep -c 'lane express: 120 non-mechanical lines' $MR/PLAN.md)" "1"
+OUT=$(AUTOPILOT_REPO=$MR POOL=plan_review $H/bin/review $XPI p1 $MR/.autopilot/tickets/$XPI.md 2>&1); check "Express: the per-ticket plan review is skipped" "$? $(echo "$OUT" | grep -c "^SKIPPED $XPI: Express lane")" "0 1"
+cat > $SCR/std.json <<'EOF'
+{"into": "ext", "id": "ext-std", "name": "One more", "description": "One more endpoint.", "why": "the owner adds one", "risk": [],
+ "rehearsal": {"cmd": "make test", "result": "all pass"},
+ "tickets": [{"slug": "std-a", "title": "Endpoint", "description": "Do it.\nCHECKS: true", "estimate": "S", "touches": ["api/more.py"]}]}
+EOF
+OUT=$(FAKE_BEHAVIOUR=auto MS add $SCR/std.json --review-k 1 2>&1); RC=$?
+check "Standard: plan review only; the reviewer gets the lane, the size and the rehearsal" "$RC $(echo "$OUT" | grep -c '^--- review: .*ext-std/plan-review.md') $(grep -c '^Lane: standard (1 ticket (max 5), no risk flag' $MR/.autopilot/plan/milestones/ext-std/review-input-1.md) $(grep -c 'Rehearsal.*make test' $MR/.autopilot/plan/milestones/ext-std/review-input-1.md)" "3 1 2 1"
+MS add $SCR/std.json --approved --by owner --source 'user:"go"' >/dev/null 2>&1
+STDI=$(J $MR/.autopilot/state.json "[m for m in d['milestones'] if m['id']=='ext'][0]['issues'][-1]")
+OUT=$(AUTOPILOT_REPO=$MR POOL=plan_review $H/bin/review $STDI p1 $MR/.autopilot/tickets/$STDI.md 2>&1)
+check "a ticket file unchanged since the milestone plan review is not plan-reviewed again" "$? $(echo "$OUT" | grep -c "^SKIPPED $STDI: ticket file unchanged since the milestone plan review") $(J $MR/.autopilot/state.json "'$STDI' in d['plan_reviewed'], '$XPI' in d['plan_reviewed']")" "0 1 True False"
+echo "Coordinator decision: also do X" >> $MR/.autopilot/tickets/$STDI.md
+OUT=$(AUTOPILOT_REPO=$MR POOL=plan_review WAIT=0 FAKE_BEHAVIOUR=approve $H/bin/review $STDI p2 $MR/.autopilot/tickets/$STDI.md 2>&1); check "an edited ticket file gets its plan review back" "$(echo "$OUT" | grep -c '^SKIPPED')" "0"
+check "reviews: no fixed number of reasons or findings in any prompt; every finding carries a class" "$(grep -cE 'at most 10|5 to 12' $H/prompts/*.md | awk -F: '{s+=$2} END{print s}') $(grep -l 'kpi-blocking|hardening|out-of-scope' $H/prompts/*.md | wc -l | tr -d ' ') $(python3 -c "
+import os,sys;sys.path.insert(0,os.environ['H']+'/bin');import autopilot_lib as l
+g,_=l.validate_reasons({'verdict':'premortem','reasons':[{'id':'a','probability':0.5,'impact':'severe','why':'w','guardrail':'g'},{'id':'b','probability':0.5,'impact':'severe','why':'w','guardrail':'g','class':'hardening'}]});print([r['class'] for r in g])")" "0 4 ['kpi-blocking', 'hardening']"
 SD=$SCR/seed-repo; mkdir -p $SD/.autopilot/plan && echo '{"branch": "x", "queue": [], "done": []}' > $SD/.autopilot/state.json
 cat > $SD/.autopilot/plan/tickets.json <<'EOF'
 {"project": {"name": "P"}, "milestones": [{"name": "M1 Base"}, {"name": "M2 More"}],
@@ -1421,4 +1487,42 @@ AUTOPILOT_GH=$SCR/fake/fakegh FAKE_CONCL=failure $H/bin/pipeline run --once >/de
 check "pipeline housekeeping raises a CRITICAL alert when CI ran on the draft branch" "$($H/bin/alert list | grep -c 'CI runs on pushes of the project branch')" "1"
 rm -f .autopilot/pipeline/gc.stamp; AUTOPILOT_GH=$SCR/fake/fakegh $H/bin/pipeline run --once >/dev/null 2>&1
 check "the alert resolves once the last push started nothing" "$($H/bin/alert list --json | python3 -c "import json,sys;print([bool(a.get('resolved_at')) for a in json.load(sys.stdin) if a['kind']=='ci'])")" "[True]"
+echo "--- stacked starts (tokens in parallel, never in series), Express roles in the pipeline, cloned dependencies"
+SK=$SCR/skrepo; mkdir -p $SK/node_modules && cd $SK && git init -q && echo base > a.txt && echo '{}' > package-lock.json && echo node_modules > .gitignore && echo dep > node_modules/dep.js && git add -A && git -c user.email=t@t -c user.name=t commit -qm init
+SKB=$(git branch --show-current); echo ".autopilot/" >> .git/info/exclude; mkdir -p .autopilot/tickets
+python3 -c "
+import json; json.dump({'branch': '$SKB', 'worktrees_dir': '$SCR/skrepo-wt', 'checks': ['true'], 'inflight': {}, 'done': [], 'queue': ['S-1', 'S-2'],
+  'blockers': {'S-2': ['S-1']}, 'lanes': {'S-3': 'express'}, 'pipeline': {'auto_start': True}}, open('.autopilot/state.json', 'w'))"
+printf '#!/bin/bash\necho "$1 r$2 k=${4:-} POOL=${POOL:-}" >> "$PLD/review2.log"\nexec %s "$@"\n' $SCR/fake/fake-review > $SCR/fake/fake-review2; chmod +x $SCR/fake/fake-review2
+export AUTOPILOT_REPO=$SK PIPELINE_SYNC=1 PIPELINE_RUN_MODEL=$SCR/fake/fake-rm PIPELINE_REVIEW=$SCR/fake/fake-review2; rm -f $PLD/review.rcs $PLD/impl.mode $PLD/impl.status $PLD/impl.file $PLD/impl.needs
+CANCLONE=$( (cp -c -R $SK/node_modules $SCR/clonetest 2>/dev/null || cp -R --reflink=always $SK/node_modules $SCR/clonetest 2>/dev/null) && echo yes || echo no)
+QT S-1 src/s.ts; QT S-2 src/s.ts; QT S-3 src/x.ts
+for i in 1 2 3 4; do TICK; done
+SW1=$SCR/skrepo-wt/S-1; SW2=$SCR/skrepo-wt/S-2
+check "auto start: the first ticket runs to approved; its worktree got node_modules as a clone (identical lockfile)" "$(ST S-1) $([ -f $SW1/node_modules/dep.js ] && echo yes || echo no)" "1 approved $CANCLONE"
+for i in 1 2; do TICK; done
+check "stacked start: the blocked ticket starts on its blocker's unreviewed work, without waiting for the merge" "$($H/bin/state get inflight.S-2.stack.on) $(git -C $SW2 log --format=%s $SKB..HEAD | grep -c '^maxxfactory-stack S-1 r1$') $([ -f $SW2/work-S-1.txt ] && echo has-blocker-work)" '"S-1" 1 has-blocker-work'
+check "nothing unreviewed on the project branch" "$(git -C $SK log --format=%s $SKB | wc -l | tr -d ' ') $(git -C $SK status --porcelain | wc -l | tr -d ' ')" "1 0"
+for i in 1 2 3 4; do TICK; done
+check "a stacked ticket whose review approved waits for its blocker: never approved before it" "$(ST S-2) $(grep -c S-2 $SK/.autopilot/pipeline/approved.txt)" "1 stacked 0"
+check "its review diff starts at the stack commit, not at the project branch" "$(grep -c "$(git -C $SW2 log --format=%H --grep='^maxxfactory-stack' -1)" $SK/.autopilot/briefs/S-2-review-1.md)" "1"
+OUT=$($PL merge S-2 "feat: s2" "b" 2>&1); check "merge of a stacked ticket before its blocker is refused" "$? $(echo "$OUT" | grep -c 'started on S-1, which is not merged yet')" "1 1"
+$PL merge S-1 "feat: s1" "b" >/dev/null 2>&1; check "the blocker merges" "$? $($H/bin/state get done | tr -d ' \n')" '0 ["S-1"]'
+for i in 1 2 3; do TICK; done
+check "blocker merged: the stack commit is dropped, the full checks run on the result, then approved" "$(ST S-2) $(git -C $SW2 log --format=%s $SKB..HEAD | wc -l | tr -d ' ') $(git -C $SW2 status --porcelain | tr -d ' ?\n') $(grep -c 'S-1 merged -> stack dropped, full checks' $SK/.autopilot/pipeline/pipeline.log)" "1 approved 0 work-S-2.txt 1"
+$PL merge S-2 "feat: s2" "b" >/dev/null 2>&1; check "then it merges: one commit per ticket on the project branch" "$? $(git -C $SK log --format=%s $SKB | grep -c '\[S-[12]\]$') $(ls $SK/work-S-1.txt $SK/work-S-2.txt 2>/dev/null | wc -l | tr -d ' ')" "0 2 2"
+$H/bin/state set pipeline '{"auto_start": false, "stack": false}' >/dev/null; $H/bin/state set blockers '{"S-5": ["S-4"]}' >/dev/null; QT S-4 src/y.ts; QT S-5 src/y.ts
+$PL wt S-4 >/dev/null 2>&1; $PL start S-4 >/dev/null 2>&1; OUT=$($PL wt S-5 --on S-4 2>&1); check "pipeline wt --on: refused while the blocker's checks have not passed" "$? $(echo "$OUT" | grep -c 'cannot be stacked on S-4')" "1 1"
+for i in 1 2 3; do TICK; done
+$PL wt S-5 --on S-4 >/dev/null 2>&1; OUT=$($PL start S-5 2>&1); check "pipeline wt --on then start: a stacked start by hand" "$? $(echo "$OUT" | grep -c 'STARTED S-5 round 1 .*(stacked on S-4)')" "0 1"
+$PL wt S-3 >/dev/null 2>&1; OUT=$($PL start S-3 2>&1)
+check "Express ticket: Tier 1 implementer role from round 1" "$(echo "$OUT" | grep -c '(Express lane)') $(grep 'S-3-impl-1.md' $PLD/rm.log | tail -1 | grep -c -- '--role express_implement$') $($H/bin/state get inflight.S-3.lane)" '1 1 "express"'
+printf '1\n1\n1\n' > $PLD/review.rcs; for i in 1 2 3; do TICK; done
+check "Express ticket: two reviewers at once from the Tier 1 express pool; a fix round stays Tier 1" "$(grep -c '^S-3 r1 k=2 POOL=express_review$' $PLD/review2.log) $(grep 'S-3-impl-2.md' $PLD/rm.log | tail -1 | grep -c -- '--role express_implement$')" "1 1"
+RW=$SCR/rbrepo; mkdir -p $RW && cd $RW && git init -q && echo base > a.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm init && RWB=$(git branch --show-current)
+git worktree add -q -b t1 $SCR/rbrepo-t1 HEAD; (cd $SCR/rbrepo-t1 && echo blocker-v1 > p.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm "maxxfactory-stack P-1 r1" && echo mine > own.txt)
+echo blocker-final > p.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm "feat: p [P-1]"
+OUT=$(cd $SCR/rbrepo-t1 && STACK_DROP=1 $H/bin/rebase-wt $SCR/rbrepo-t1 $RWB 2>&1)
+check "rebase-wt STACK_DROP: the stack commit is left behind, the blocker's merged version wins, the ticket's own work stays uncommitted" "$(echo "$OUT" | grep -c '^REBASED') $(cat $SCR/rbrepo-t1/p.txt) $(git -C $SCR/rbrepo-t1 rev-list --count $RWB..HEAD) $(git -C $SCR/rbrepo-t1 status --porcelain | tr -d ' ?')" "1 blocker-final 0 own.txt"
+unset AUTOPILOT_REPO PIPELINE_SYNC PIPELINE_RUN_MODEL PIPELINE_REVIEW
 echo "=== $PASS passed, $FAIL failed"

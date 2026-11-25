@@ -44,6 +44,27 @@ add: extends a running project with a milestone, in this order, never skipping a
   --dry-run validates and prints the stages and per-milestone ETAs the project would have, with no external call.
   --skip-premortem / --skip-review take the reason, which is written into status.json and the decision.
 
+Lanes (2026-11-25, `lib.spec_lane`): the first thing `add` does is size the work, and the lane decides the steps.
+  express   at most 600 non-mechanical changed lines in all (every ticket sized in "lines"), no risk flag: the tickets
+            of the spec become the ordered steps of ONE ticket; no pre-mortem (b) and no plan review (c); it runs in
+            one worktree with one Tier 1 implementer, the full checks and two Tier 1 reviewers of two vendors on the
+            final diff, in parallel (state.json `lanes`, read by bin/pipeline).
+  standard  at most 5 tickets, no risk flag: plan review (c) only.
+  full      anything else, any risk flag, or a spec without "risk": pre-mortem (b) and plan review (c), as before.
+  "risk" lists the flags that apply (auth, secrets, data-migration, payments, irreversible; [] when none). The spec
+  text is scanned for them too: a hit counts unless "risk_cleared" gives the reason it does not apply. A risk flag
+  forces Full. "lane" overrides: heavier always; lighter needs "lane_why" and no active risk flag.
+  --dry-run prints the lane, why, and the ETA of every lane the spec could take, so the owner chooses before any
+  review is paid for. The lane and its reason go into the decision.
+Rehearsal (2026-11-25): before any model review (b, c) and before an Express approval, the spec must hold
+  "rehearsal": {"cmd": "<what was run>", "result": "<what happened: failing checks, counts, files>"}: the planner
+  applies the cheapest destructive version of the change in a scratch worktree (`pipeline wt <name> --detach`) and
+  runs the full checks. Reviewers get it as settled facts and look for what a run cannot find.
+  {"skipped": "<why>"} when nothing can be rehearsed (a new repo, docs only); the reason goes into the decision.
+At approval (g) the ticket files `.maxxfactory/tickets/<ISSUE>.md` are written from the spec, and when the plan review
+  ran their digest is recorded (state.json `plan_reviewed`): bin/review then skips the per-ticket plan review of a
+  file that did not change. A coordinator that edits a ticket file gets its plan review back.
+
 add with "into": tickets added to a milestone that already exists (one ticket, a few, a QA pass). The spec names
   the milestone in "into" and the batch in "id" (a new slug: the working directory and the PLAN.md marker); "name" is
   an optional label of the batch. The tickets inherit the milestone's KPIs ("kpis" is optional: only the KPIs this
@@ -56,11 +77,16 @@ spec.json:
   {"id": "whitebox", "name": "Whitebox + PR agents", "description": "one paragraph", "why": "one sentence",
    "kpis": [{"id": "K1", "kpi": "...", "target": "...", "measure": "command / query / count"}],
    "plan": "markdown: goal, architecture, rules and guardrails of this milestone",
+   "risk": [] | ["auth", ...], "risk_cleared": {"auth": "why it does not apply"}, "lane": "full", "lane_why": "...",
+   "rehearsal": {"cmd": "...", "result": "..."} | {"skipped": "why"},
    "tickets": [{"slug": "api", "title": "...", "description": "markdown", "estimate": 2 | "M", "priority": 2,
+                "lines": 180, "mechanical_lines": 600, "mechanical": false,
                 "touches": ["api/app.py", "web/src/components/drawer/"],
                 "blocked_by": ["other-slug", "ENG-12", "slug-of-an-existing-ticket"], "labels": [], "from_idea": "ENG-40"}],
   Ticket shape (refused otherwise): estimate at most M (one concern, about 400 changed lines); `touches` lists
-  the files or modules the ticket changes (max 8); two tickets that can run in parallel never change the same
+  the files or modules the ticket changes (max 8); "lines" (non-mechanical changed lines) at most 400; a ticket
+  that is only mechanical (data files, deletions, renames, one-line repoints) says "mechanical": true and has no
+  size or touches cap; two tickets that can run in parallel never change the same
   file outside a shared test or docs path (a directory named tests, test, __tests__ or docs at any depth, or a
   file named *.test.*, *.spec.*, test_*.py or *_test.py). Order them with blocked_by or split by file.
    "from_ideas": ["ENG-40"]}   (optional: ideas promoted into this milestone, see g2)
@@ -106,6 +132,9 @@ IDENT = re.compile(r'^[A-Z][A-Z0-9]*-\d+$')
 SLUG = re.compile(r'^[a-z0-9][a-z0-9-]*$')
 SML = {'XS': 0.5, 'S': 1.0, 'M': 2.0, 'L': 3.0, 'XL': 5.0}
 NEEDS_APPROVAL = 3
+REVIEW_MINUTES = {'express': 0, 'standard': 15, 'full': 40}  # allowance for the planning reviews of a lane, added to its ETA
+LANE_STEPS = {'express': 'one ticket, one worktree, Tier 1 implementer, 2 Tier 1 reviewers in parallel; no pre-mortem, no plan review',
+              'standard': 'plan review, then the pipeline', 'full': 'pre-mortem and plan review, then the pipeline'}
 
 
 def estimate(t):
@@ -353,11 +382,31 @@ def cell(s):
     return ' '.join(str(s or '').split()).replace('|', '\\|') or '-'
 
 
-def render_section(spec, mid, ids=None, meta=None):
+def lane_line(lane):
+    return (f'Lane: {lane["lane"]} ({"; ".join(lane["why"])}). Size: {lane["tickets"]} ticket{"" if lane["tickets"] == 1 else "s"}, '
+            f'{lane["lines"]} non-mechanical lines, {lane["mechanical_lines"]} mechanical.')
+
+
+def rehearsal_of(spec):
+    """('ok', markdown) | ('skipped', reason) | (None, why it is missing)."""
+    r = spec.get('rehearsal')
+    if isinstance(r, dict) and str(r.get('skipped') or '').strip():
+        return 'skipped', str(r['skipped']).strip()
+    if isinstance(r, dict) and str(r.get('cmd') or '').strip() and str(r.get('result') or '').strip():
+        return 'ok', f'**Rehearsal** (run by the planner before any review): `{str(r["cmd"]).strip()}`\n\n{str(r["result"]).strip()}'
+    return None, ('the spec has no "rehearsal": apply the cheapest destructive version of the change in a scratch worktree '
+                  '(bin/pipeline wt <name> --detach), run the full checks, and write {"cmd": "...", "result": "..."}; or '
+                  '{"skipped": "<why nothing can be rehearsed>"}')
+
+
+def render_section(spec, mid, ids=None, meta=None, lane=None):
     ids = ids or {}
     head = f'#### {spec["name"]}: {spec.get("batch") or mid}' if spec.get('into') else f'### {spec["name"]}'
     lines = [f'{head} <!-- milestone:{mid} -->', '', spec.get('description', '').strip(), '']
     if meta: lines += [meta, '']
+    if lane: lines += [lane_line(lane), '']
+    kind, text = rehearsal_of(spec)
+    if kind == 'ok': lines += [text, '']
     if spec.get('kpis') or not spec.get('into'):
         lines += ['| # | KPI / acceptance | Target | How measured |', '|---|---|---|---|']
     lines += [f'| {cell(k.get("id") or f"K{i}")} | {cell(k["kpi"])} | {cell(k["target"])} | {cell(k["measure"])} |'
@@ -519,6 +568,50 @@ def make_review_worktree(repo, mid):
     return wt
 
 
+def lane_etas(repo, st, mid, full_spec, lane):
+    """[(lane name, text)] for every lane the spec could take (its computed lane and the heavier ones): the ETA of
+    the milestone on a what-if schedule, plus the allowance for that lane's planning reviews."""
+    out = []
+    for name in lib.LANES[lib.LANES.index(lane['computed']):]:
+        sp = lib.express_spec(full_spec) if name == 'express' else full_spec
+        errs, resolved = validate(sp, st, repo, mid)
+        if errs:
+            out.append((name, f'not valid as {len(sp["tickets"])} tickets: {errs[0]}')); continue
+        ids = {t['slug']: '+' + t['slug'] for t in sp['tickets']}
+        w = what_if(st, mid, sp, resolved, ids)
+        try: apply_schedule(w)
+        except ValueError as ex:
+            out.append((name, str(ex))); continue
+        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
+            json.dump(w, f)
+        try: e = eta(repo, f.name)
+        finally: os.unlink(f.name)
+        row = next((r for r in e.get('milestones') or [] if r.get('name') == sp['name']), None) or {}
+        end = row.get('end') or e.get('end')
+        if end:
+            end = (dt.datetime.fromisoformat(end) + dt.timedelta(minutes=REVIEW_MINUTES[name])).isoformat()
+        out.append((name, f'{len(sp["tickets"])} ticket{"" if len(sp["tickets"]) == 1 else "s"} in {len([x for x in w["stages"] if any(i in ids.values() for i in x)])} stage(s); '
+                          f'{LANE_STEPS[name]}  |  ' + (f'ETA {when(end)}' if end else (row.get('when') or e.get('when') or 'no ETA'))))
+    return out
+
+
+def ticket_file_text(t, spec):
+    """The ticket file of a spec ticket: its title and instructions as approved, a `Touches` line, and the common rules."""
+    d = str(t.get('description') or '').strip()
+    out = [f'# {t["title"]}', '', d, '']
+    if not re.search(r'^\W*Touches[^:\n]*:', d, re.M | re.I) and t.get('touches'):
+        out += ['Touches: ' + ', '.join(f'`{p}`' for p in t['touches']), '']
+    if t.get('mechanical') is True:
+        out += ['Mechanical ticket: every change follows the pattern in the instructions. Reviewers read the diff for a '
+                'change outside that pattern or a check that no longer tests what it tested; nothing else blocks.', '']
+    kind, text = rehearsal_of(spec)
+    if kind == 'ok': out += [text, '']
+    tpl = os.path.join(lib.HOME, 'templates', 'ticket.md')
+    common = open(tpl).read().split('COMMON RULES', 1) if os.path.exists(tpl) else ['']
+    if len(common) == 2: out += ['COMMON RULES' + common[1].split('\nCoordinator decision:')[0].rstrip(), '']
+    return '\n'.join(out)
+
+
 def cmd_add(a):
     repo = lib.find_repo(); st = lib.load_state(repo)
     try: spec = lib.read_json(a.spec)
@@ -531,6 +624,13 @@ def cmd_add(a):
         spec = dict(spec, batch=spec.get('batch') or spec.get('name') or spec['id'], name=(target or {}).get('name') or into)
     if into and any(m.get('id') == spec.get('id') for m in st.get('milestones') or []):
         print(f'INVALID: milestone id {spec["id"]!r} already exists: a batch added with "into" needs a new id'); sys.exit(1)
+    # Triage before anything else: the lane decides which of the steps below run (see "Lanes").
+    lane = lib.spec_lane(spec)
+    if lane['errors']:
+        for e in lane['errors']: print(f'INVALID: {e}')
+        sys.exit(1)
+    full_spec = spec
+    if lane['lane'] == 'express': spec = lib.express_spec(spec)  # the tickets become the steps of one ticket
     what = f'{len(spec.get("tickets") or [])} tickets into milestone {spec["name"]!r}' if into else None
     mid = spec.get('id') or re.sub(r'[^a-z0-9]+', '-', (spec.get('name') or '').lower()).strip('-')
     d = lib.pdir(repo, 'plan', 'milestones', mid)
@@ -562,6 +662,10 @@ def cmd_add(a):
         for x in placeholders(spec): print(f'  warning: {x} is still TODO: fill it before the real add')
         show_schedule(w['stages'], w['critical_path'])
         for x in warnings: print(f'  warning: {x}')
+        print(lane_line(lane))
+        for name, text in lane_etas(repo, st, mid, full_spec, lane):
+            print(f'  {"->" if name == lane["lane"] else "  "} {name:<9} {text}')
+        if rehearsal_of(spec)[0] is None: print('  warning: no "rehearsal" yet: the real add refuses to start a review without it')
         with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
             json.dump(w, f)
         try: e = eta(repo, f.name)
@@ -575,7 +679,8 @@ def cmd_add(a):
     if todo: die(f'still TODO in {a.spec}: {", ".join(todo)}. Fill them (measurable KPIs, the plan, ticket instructions) first')
     os.makedirs(d, exist_ok=True)
     digest = lib.digest_text(json.dumps(spec, sort_keys=True))
-    section = render_section(spec, mid)
+    section = render_section(spec, mid, lane=lane)
+    status['lane'] = {k: lane[k] for k in ('lane', 'computed', 'why', 'lines', 'mechanical_lines', 'risk')}
     write_text(os.path.join(d, 'section.md'), section)
     plan_path = os.environ.get('AUTOPILOT_PLAN') or os.path.join(repo, 'PLAN.md')
     if not os.path.exists(plan_path): die(f'{plan_path} not found: the milestone section and its decision go there')
@@ -586,8 +691,21 @@ def cmd_add(a):
     stale = not a.approved and status.get('reviewed_digest') not in (None, digest)
     if into and not a.skip_premortem:  # the milestone was pre-mortem'd when it was planned: tickets added to it get the plan review only
         a.skip_premortem = 'tickets added to an existing milestone: its pre-mortem stands'
+    if lane['lane'] != 'full' and not a.skip_premortem:
+        a.skip_premortem = f'{lane["lane"].capitalize()} lane ({"; ".join(lane["why"])}): no pre-mortem'
+    if lane['lane'] == 'express' and not a.skip_review:
+        a.skip_review = 'Express lane: no plan review; two Tier 1 reviewers of two vendors read the final diff'
     run_pm = not applied and (stale or not status.get('premortem')) and not a.skip_premortem
     run_rv = not applied and (stale or not status.get('review')) and not a.skip_review
+    # Facts before opinions: nothing is sent to a reviewer, and no Express change is approved, before the rehearsal.
+    rh_kind, rh_text = rehearsal_of(spec)
+    if not applied and rh_kind is None and (run_pm or run_rv or (lane['lane'] == 'express' and not status.get('decision'))):
+        die(rh_text)
+    status['rehearsal'] = {'skipped': rh_text} if rh_kind == 'skipped' else {'given': rh_kind == 'ok'}
+    facts = (f'{lane_line(lane)} Scale the review to that size: give the findings that are real, however few; do not pad '
+             'the list, and do not ask for more process than the lane has.\n\n'
+             + ('The rehearsal in the section below was run by the planner on this repository: treat its result as settled '
+                'and look for what a run cannot find.\n\n' if rh_kind == 'ok' else f'No rehearsal was run ({rh_text}).\n\n'))
     review_wt = None
     try:
         if run_pm or run_rv:
@@ -603,7 +721,7 @@ def cmd_add(a):
                            'Only the milestone below is under review. The existing plan after the separator is context: it was '
                            'already pre-mortem\'d and is being executed. Raise a reason about it only when this milestone makes '
                            'it fail (shared files, a dependency, a KPI it moves, the deadline).\n\n'
-                           f'{section}\n---\n\n# Existing plan (context)\n\n{ctx}')
+                           f'{facts}{section}\n---\n\n# Existing plan (context)\n\n{ctx}')
                 cmd = [os.path.join(BIN, 'premortem'), os.path.join(d, 'premortem-input.md'), '--repo', review_wt,
                        '--planner', planner, '--out-dir', d]
                 print(f'pre-mortem of milestone {mid} (10-40 min) ...', flush=True)
@@ -635,8 +753,12 @@ def cmd_add(a):
                                 '`touches` list that matches what the instructions really change, and no two tickets that '
                                 'can run in parallel changing the same file (including files that tickets already in '
                                 'flight change). A ticket that is too big or shares a hot file is a major finding: name the '
-                                'split.\n\n'
-                                + section)
+                                'split. Lines a ticket declares as mechanical (`mechanical_lines`, or `"mechanical": true`: '
+                                'data files, deletions, renames, one-line repoints) do not count in that size; a ticket that '
+                                'calls real logic mechanical is a major finding. A risk the spec does not declare (auth, '
+                                'secrets, data migration, payments, an irreversible outward action), or one it cleared '
+                                'without a reason that holds, is a blocker.\n\n'
+                                + facts + section)
                 rc, brief, err = run(repo, [os.path.join(BIN, 'mkbrief'), 'plan', f'milestone-{mid}', f'm{n}', inp],
                                      {'WT': review_wt})  # the brief names the worktree the reviewer reads
                 if rc != 0: die(f'mkbrief failed: {err.strip()}')
@@ -659,18 +781,22 @@ def cmd_add(a):
         drop_review_worktree(repo, review_wt)
     if not applied and (ran_review_now or not a.approved):
         print(f'NEEDS APPROVAL: {what} ({mid})' if into else f'NEEDS APPROVAL: milestone {spec["name"]!r} ({mid}), {len(spec["tickets"])} tickets')
+        print(lane_line(lane))
         for k in ('premortem', 'review'):
             s = status[k]
             print(f'--- {k}: ' + (f'SKIPPED ({s["skipped"]})' if s.get('skipped') else s['path'] + (' DEGRADED' if s.get('degraded') else '')))
             if not s.get('skipped'): print(open(s['path']).read().rstrip())
-        print(f'---\nFold the findings into {a.spec} (each accepted reason gets a guardrail with a home: a KPI, a check, a '
-              'ticket, a rule; a rejected one is logged with its evidence), show them to the owner, then rerun with\n'
+        print(f'---\nFold into {a.spec} only what is `kpi-blocking` (it would make a KPI or an acceptance criterion fail), with '
+              'the cheapest guardrail that works: a check line before a criterion, a criterion before a ticket. `hardening` '
+              'and `out-of-scope` findings are parked (bin/idea), not folded. A rejected one is logged with its evidence. '
+              'Show all of them to the owner, then rerun with\n'
               f'  --approved --by <owner> --source user:"<their approval, quoted>"')
         sys.exit(NEEDS_APPROVAL)
     # e. decision
     if not status.get('decision'):
         skipped = [f'{k} skipped: {status[k]["skipped"]}' for k in ('premortem', 'review') if status[k].get('skipped')]
-        why = '; '.join([spec.get('why') or (spec.get('description') or '').split('. ')[0]] + skipped).strip('; ')
+        if status.get('rehearsal', {}).get('skipped'): skipped.append(f'rehearsal skipped: {status["rehearsal"]["skipped"]}')
+        why = '; '.join([spec.get('why') or (spec.get('description') or '').split('. ')[0], f'lane {lane["lane"]}: {"; ".join(lane["why"])}'] + skipped).strip('; ')
         rc, out, err = run(repo, [os.path.join(BIN, 'decision'), 'add', '--change', (f'milestone {spec["name"]}: {len(spec["tickets"])} tickets added ({mid})' if into else
                                                            f'milestone {spec["name"]} added: {len(spec["tickets"])} tickets'),
                                   '--source', a.source, '--by', a.by, '--why', why,
@@ -703,7 +829,16 @@ def cmd_add(a):
                  f'Added {dt.date.today().isoformat()} as an extension ({status["decision"]}). ')
                 + ' · '.join(f'{label}: ' + (f'skipped ({status[k]["skipped"]})' if status[k].get('skipped') else f'`{os.path.relpath(status[k]["path"], repo)}`')
                              for k, label in (('premortem', 'Pre-mortem'), ('review', 'plan review'))))
-        write_text(plan_path, insert_section(open(plan_path).read(), mid, render_section(spec, mid, ids, meta), after=into))
+        write_text(plan_path, insert_section(open(plan_path).read(), mid, render_section(spec, mid, ids, meta, lane=lane), after=into))
+        # The ticket files, as approved. With a plan review behind them, their digest lets bin/review skip the
+        # per-ticket plan review while a file is unchanged; an Express ticket is never plan-reviewed (state `lanes`).
+        reviewed, written = {}, status['review'].get('path') or lane['lane'] == 'express'
+        for t in spec['tickets'] if written else []:
+            tf = lib.pdir(repo, 'tickets', ids[t['slug']] + '.md')
+            if not os.path.exists(tf):
+                os.makedirs(os.path.dirname(tf), exist_ok=True); write_text(tf, ticket_file_text(t, spec))
+                if status['review'].get('path'):
+                    reviewed[ids[t['slug']]] = {'sha': lib.file_digest(tf), 'review': os.path.relpath(status['review']['path'], repo)}
 
         def fn(s):
             s.setdefault('milestones', [])
@@ -729,6 +864,9 @@ def cmd_add(a):
             for t in spec['tickets']:
                 s['blockers'][ids[t['slug']]] = [ids.get(b, b) for b in resolved[t['slug']]]
                 s['sizes'][ids[t['slug']]] = units(t.get('estimate', 1))
+            if reviewed: s.setdefault('plan_reviewed', {}).update(reviewed)
+            if lane['lane'] == 'express':
+                for t in spec['tickets']: s.setdefault('lanes', {})[ids[t['slug']]] = 'express'
             (s.get('proposed_milestones') or {}).pop(mid, None)
             return apply_schedule(s)
 

@@ -10,6 +10,9 @@
 #   `pipeline merge` squash the ticket into one commit). Aborting it instead would only make every later call hit the
 #   same conflict again.
 # - a rebase already in progress, or unresolved (UU) files: nothing is touched, CONFLICT is reported again.
+# - STACK_DROP=1 (bin/pipeline, once the blocker a stacked ticket started on is merged): the stack commit (subject
+#   `maxxfactory-stack <ISSUE> ...`, the blocker's unreviewed work the ticket was started on) and every commit under it
+#   are left behind: only the ticket's own work is replayed onto the project branch, which now holds the merged blocker.
 # The whole operation holds a repo-level lock: the stash stack is shared by every worktree of a repo, so two
 # parallel rebase-wt calls must never interleave. On conflicts it prints `CONFLICT ...` and the files and exits 3
 # (a stash kept is named: resolve in the worktree, then `git reset -q && git stash drop <ref>`).
@@ -39,7 +42,11 @@ if [ "$AHEAD" != 0 ]; then
     ID=(); git config user.email >/dev/null || ID=(-c user.name=autopilot -c user.email=autopilot@localhost)
     git add -A; git "${ID[@]}" commit -q --no-verify -m "$WIP"
   fi
-  if ! git rebase "$BRANCH" >/dev/null 2>&1; then
+  STACK=""
+  if [ "${STACK_DROP:-}" = 1 ]; then
+    STACK=$(git log --format='%H %s' "$BRANCH..HEAD" | awk '$2 == "maxxfactory-stack" {print $1; exit}')
+  fi
+  if ! { if [ -n "$STACK" ]; then git rebase --onto "$BRANCH" "$STACK"; else git rebase "$BRANCH"; fi; } >/dev/null 2>&1; then
     if in_rebase; then
       echo "CONFLICT (rebase of the ticket commits onto $BRANCH left in progress in $W: resolve, git add, GIT_EDITOR=true git rebase --continue; the uncommitted work is the commit \"$WIP\")"
       unmerged; exit 3

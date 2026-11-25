@@ -30,8 +30,10 @@ Confirmed by the owner at intake (verbatim), from `bin/run-model pool <role>`:
 
 | Phase | Tier | Models and accounts now (capacity, credit left) | Excluded / last resort |
 |---|---|---|---|
-| Planning, coordination | 1 | | |
-| Pre-mortem, plan review, milestone review | 1, another vendor than the planner | | |
+| Planning (the planner session) | 0 (1 without a Tier 0 subscription) | | |
+| Pre-mortem, plan review, milestone review | 0, another vendor than the planner (1 when no Tier 0 is eligible, logged) | | |
+| Coordination of the run | 1 | | coordinator account: protected |
+| Express changes (small, no risk flag): implementation, and review of the final diff | 1; two reviewers of two vendors, neither the implementer's | | entries flagged `no_implement` never implement |
 | Implementation and fix rounds | 2 (3 only if pinned) | | coordinator account: last resort |
 | Ticket code review | 2, never an implementer of the ticket (fallback Tier 1) | | coordinator account: last resort |
 | Trivial tasks | 3-4 | | |

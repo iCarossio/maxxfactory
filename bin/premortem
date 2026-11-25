@@ -17,7 +17,7 @@ Hard rules (fail closed):
 - --planner <roster key> is required (or --exclude-vendor): the planner's vendor and model id are excluded on every
   account, so a model never reviews its own plan. The recorded project coordinator (state.json `coordinator`) is
   excluded the same way `run-model` excludes it for a plan role: picker and runner must refuse the same keys;
-- reviewers are Tier 1 only (roles premortem / plan_review, drawn at random weighted by the credit left on each
+- reviewers are Tier 0 first, Tier 1 when no Tier 0 model is eligible (logged by run-model), never lower (roles premortem / plan_review, drawn at random weighted by the credit left on each
   account), k distinct vendors; when fewer are available the run is degraded, never filled with a second model of the
   same vendor nor with another tier (the old --allow-mid is refused);
 - a reviewer that modified the tree, or whose output does not parse, does not count.
@@ -78,14 +78,14 @@ if coord in reg['models']:
     ex_keys.append(coord); ex_vendors.append(lib.vendor_of(reg['models'][coord], ad.get(reg['models'][coord]['cli'])))
 EX = lib.expand_exclusions(reg, keys=ex_keys, vendors=ex_vendors, ad=ad)
 if '--allow-mid' in args:
-    sys.exit('premortem: --allow-mid was removed by the tier policy: pre-mortems are Tier 1 only (run-model wait premortem, or tell the owner)')
+    sys.exit('premortem: --allow-mid was removed by the tier policy: pre-mortems are Tier 0, then Tier 1, never lower (run-model wait premortem, or tell the owner)')
 pick, vendors = lib.pick_reviewers(reg, ['premortem', 'plan_review'], k, EX, ad)
 names = ', '.join('%s (%s)' % (x, v) for x, v in zip(pick, vendors)) or 'none'
 print('reviewers: %s  (excluded vendors: %s; Tier 1)' % (names, ', '.join(sorted(set(ex_vendors)))))
 if '--dry-run' in args:
     sys.exit(0 if len(pick) >= k else 1)
 if not pick:
-    print('NO_REVIEWER: no healthy Tier 1 model outside the excluded vendors (run-model health / usage; wait: run-model wait premortem; tell the owner)'); sys.exit(2)
+    print('NO_REVIEWER: no healthy Tier 0 or Tier 1 model outside the excluded vendors (run-model health / usage; wait: run-model wait premortem; tell the owner)'); sys.exit(2)
 out_dir = os.path.abspath(opt(args, '--out-dir', lib.pdir(repo, 'plan'))); os.makedirs(out_dir, exist_ok=True)
 plan = open(plan_path).read()
 plan_digest = lib.digest_text(plan)
@@ -164,6 +164,7 @@ for key, j in final.items():
         hit = next((m for m in merged if similar(m, r)), None)
         if hit:
             hit['raised_by'] = sorted(set(hit['raised_by'] + [key]))
+            if r.get('class') == 'kpi-blocking': hit['class'] = 'kpi-blocking'  # the stricter class wins a merge
             hit['probability'] = max(float(hit.get('probability') or 0), float(r.get('probability') or 0))
             if IMPACT.get(r.get('impact'), 0) > IMPACT.get(hit.get('impact'), 0): hit['impact'] = r['impact']
             for f in ('why', 'early_signal', 'guardrail', 'kpi_link'):
@@ -182,9 +183,11 @@ lib.write_json_atomic(meta_path, result)
 who = ', '.join('%s (%s, %s)' % (x, status[x]['vendor'], 'both passes' if x in complete else 'pass 1 only') for x in final)
 head = '# Pre-mortem: %d failure reasons from %s' % (len(merged), who)
 if degraded: head += '  **DEGRADED**: wanted %d reviewers with both passes (status: %s)' % (k, json.dumps({x: (s['pass1'], s['pass2']) for x, s in status.items()}))
-lines = [head, '', '| # | Failure reason | P | Impact | Raised by | Early signal | Guardrail to add |', '|---|---|---|---|---|---|---|']
+lines = [head, '', '| # | Failure reason | P | Impact | Class | Raised by | Early signal | Guardrail to add |', '|---|---|---|---|---|---|---|---|']
 for i, r in enumerate(merged, 1):
-    lines.append('| %d | **%s**: %s | %s | %s | %s | %s | %s |' % (i, r.get('title', r.get('id', '')), r.get('why', ''), r.get('probability', ''), r.get('impact', ''), ', '.join(r['raised_by']), r.get('early_signal', ''), r.get('guardrail', '')))
+    lines.append('| %d | **%s**: %s | %s | %s | %s | %s | %s | %s |' % (i, r.get('title', r.get('id', '')), r.get('why', ''), r.get('probability', ''), r.get('impact', ''), r.get('class', 'kpi-blocking'), ', '.join(r['raised_by']), r.get('early_signal', ''), r.get('guardrail', '')))
+parked = [r for r in merged if r.get('class') != 'kpi-blocking']
+if parked: lines += ['', 'Fold in: the %d `kpi-blocking` reason(s). Park as ideas (bin/idea), do not fold: %s.' % (len(merged) - len(parked), ', '.join('#%d' % (merged.index(r) + 1) for r in parked))]
 for x, s in result['summaries'].items(): lines += ['', '%s: %s' % (x, s)]
 open(os.path.join(out_dir, 'premortem.md'), 'w').write('\n'.join(lines) + '\n')
 print('wrote %s and premortem.json: %d reasons, top: %s' % (os.path.join(out_dir, 'premortem.md'), len(merged), ', '.join(str(r.get('title', '')) for r in merged[:3])))

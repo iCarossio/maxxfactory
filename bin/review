@@ -12,7 +12,12 @@ at the worktree before anything else).
 
 Who reviews (fail closed, whatever the caller says):
 - the role's tier: a ticket code review is Tier 2 (POOL=review, the default; review_mid / review_high are aliases);
-  POOL=plan_review, premortem or milestone_review is Tier 1. Never Tier 4;
+  POOL=plan_review, premortem or milestone_review is Tier 0 first, then Tier 1 when no Tier 0 model of another vendor
+  than the planner is eligible and healthy (logged by run-model); POOL=express_review (the Express lane: k=2) is
+  Tier 1, of vendors no implementer of the ticket used. Never Tier 4;
+- a per-ticket plan review (POOL=plan_review on a ticket) is skipped, exit 0, when the ticket file is byte-identical
+  to the one `bin/milestone add` wrote at the owner's approval after the milestone plan review (state.json
+  `plan_reviewed`), and for a ticket of the Express lane (state.json `lanes`): the same text is never reviewed twice;
 - never a model that implemented the ticket in any round (state.json `implementers`, written by run-model before each
   dispatch), on any account or harness; among the HEALTHY reviewers (not cooling down, CLI installed, not excluded,
   credit left) one of another vendor than every implementer is preferred, not required: when none is healthy, any
@@ -33,7 +38,7 @@ Who reviews (fail closed, whatever the caller says):
 
 No eligible healthy reviewer in the role's tier nor its backup tier: when one comes back within `review_wait_minutes`
 (models.json, default 90) this waits for it (WAIT=0 disables waiting); otherwise it raises a CRITICAL alert
-(bin/alert, Linear project update) and exits 2 `NO_REVIEWER`. Never Tier 0 or Tier 4.
+(bin/alert, Linear project update) and exits 2 `NO_REVIEWER`. Never Tier 4; Tier 0 only for a plan role.
 
 EXCLUDE=<key>[,<key>]  extra keys (expanded to every account of the same model id).
 EXCLUDE_VENDOR=<v>[,<v>]  extra vendors.
@@ -58,10 +63,20 @@ MIN = int(os.environ.get('MIN_REVIEWS', k))
 if not 1 <= MIN <= k:
     sys.exit('review: MIN_REVIEWS must be between 1 and %d' % k)
 if os.environ.get('ALLOW_MID') == '1':
-    sys.exit('review: ALLOW_MID was removed by the tier policy: plan reviews are Tier 1 only (wait, or tell the owner)')
+    sys.exit('review: ALLOW_MID was removed by the tier policy: plan reviews are Tier 0, then Tier 1, never lower (wait, or tell the owner)')
 if ROLE not in lib.REVIEW_ROLES:
     sys.exit('review: POOL=%s is role %s, which never reviews' % (POOL, ROLE))
 PLAN = ROLE in lib.PLAN_ROLES
+
+# The same text is never plan-reviewed twice (2026-11-25): a ticket file unchanged since the owner approved the
+# milestone it was plan-reviewed in, or a ticket of the Express lane (its review is the two reviewers of the final diff).
+if POOL == 'plan_review':
+    _tf = lib.pdir(M, 'tickets', iss + '.md')
+    _rec = (state.get('plan_reviewed') or {}).get(iss) or {}
+    if (state.get('lanes') or {}).get(iss) == 'express':
+        print('SKIPPED %s: Express lane, no per-ticket plan review (two reviewers read the final diff)' % iss); sys.exit(0)
+    if _rec.get('sha') and os.path.exists(_tf) and lib.file_digest(_tf) == _rec['sha']:
+        print('SKIPPED %s: ticket file unchanged since the milestone plan review (%s)' % (iss, _rec.get('review') or 'approved plan')); sys.exit(0)
 
 impl_keys, impl_ids = lib.implementers_of(M, iss)
 ex_keys = [e for e in os.environ.get('EXCLUDE', '').split(',') if e] + impl_keys
@@ -72,6 +87,8 @@ if PLAN:
         ex_vendors.append(lib.vendor_of(reg['models'][coord], ad.get(reg['models'][coord]['cli'])))
     if not ex_vendors:
         sys.exit('review: a plan review needs the planner identity: set `coordinator` (roster key) in .maxxfactory/state.json or EXCLUDE_VENDOR=<vendor>')
+if ROLE == 'express_review':  # two reviewers of two vendors, neither the vendor of a model that wrote the change
+    ex_vendors += [lib.vendor_of(reg['models'][x], ad.get(reg['models'][x]['cli'])) for x in impl_keys if x in reg['models']]
 EX = lib.expand_exclusions(reg, keys=ex_keys, vendors=ex_vendors, identities=impl_ids, ad=ad)
 if not PLAN:
     EX -= lib.review_exemptions(M, reg)  # owner exception for a quota gap, see review_exemptions

@@ -52,7 +52,8 @@ base = 'HEAD'
 if lib.is_git(R):
     ahead = lib.git(R, 'rev-list', '--count', '%s..HEAD' % S['branch']).stdout.strip()
     if ahead.isdigit() and int(ahead) > 0:
-        base = lib.git(R, 'merge-base', S['branch'], 'HEAD').stdout.strip() or 'HEAD'
+        # A ticket started on its unmerged blocker (bin/pipeline "Stacked starts"): its own diff starts at the stack commit.
+        base = lib.stack_commit(R, S['branch']) or lib.git(R, 'merge-base', S['branch'], 'HEAD').stdout.strip() or 'HEAD'
 rep = {'ISSUE_ID': iss, 'ISSUE_TITLE': title, 'CWD': R, 'BRANCH': S['branch'], 'CONTEXT_FILES': ctx,
        'ISSUE_BODY': body, 'ACCEPTANCE': acc, 'FINDINGS': findings, 'CHECKS': checks, 'BASE': base, 'ROUND': str(n), 'TICKET_PATH': os.path.abspath(tf), 'SCOPE': os.environ.get('SCOPE', '(whole ticket)')}
 for k, v in rep.items():

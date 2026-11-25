@@ -24,7 +24,7 @@ You are READ-ONLY: do not edit, create or delete any file, do not run git comman
 6. **Operational risks**: quotas and model availability over a long unattended run, parallel tickets colliding (ports, generated files, shared manifests), merges, environment (Docker, services, secrets).
 
 ## Output
-Rank by probability x impact. 5 to 12 reasons; fewer good ones beat many weak ones. Every reason needs an early signal (what the coordinator would observe, and by when) and a concrete guardrail (a rule, a check command, an acceptance criterion or a dedicated ticket) that would have prevented it. `kpi_link` names the KPI it threatens, or "none".
+Rank by probability x impact. As many reasons as are real for a plan of this size, and no more: there is no target number. A small plan may have two; a large one more. A reason is real when you can name its evidence in this plan or this repository and it would make a KPI or an acceptance criterion fail; never add one to reach a count, and never keep a weak one because the list looks short. `class` says what the reason threatens: `kpi-blocking` (a KPI or an acceptance criterion of this plan fails without the guardrail), `hardening` (the plan meets its KPIs without it; it makes the result more robust) or `out-of-scope` (work the plan does not promise). Only `kpi-blocking` reasons are folded into the plan; the others are parked as ideas, so say so honestly. The guardrail is the cheapest one that works, in this order: a check command, an acceptance criterion or a rule on an existing ticket, and a new ticket only when none of those can do it. Never ask for more process than the plan's lane and size (stated at the top of the plan when there is one) call for. A result the plan already states as run by the planner (a rehearsal) is settled: do not re-derive it, look for what a run cannot find. Every reason needs an early signal (what the coordinator would observe, and by when) and a concrete guardrail (a rule, a check command, an acceptance criterion or a dedicated ticket) that would have prevented it. `kpi_link` names the KPI it threatens, or "none".
 
 ## Style
 Caveman: terse, no preamble, no recap. Paths, commands, numbers verbatim.
@@ -33,6 +33,7 @@ Caveman: terse, no preamble, no recap. Paths, commands, numbers verbatim.
 ```json
 {"verdict": "premortem", "pass": {{PASS}},
  "reasons": [{"id": "short-slug", "title": "one line", "probability": 0.0, "impact": "fatal|severe|moderate",
+              "class": "kpi-blocking|hardening|out-of-scope",
               "why": "specific evidence from the plan or the repo", "early_signal": "what shows it is happening, by when",
               "guardrail": "exact rule / check / criterion / ticket to add", "kpi_link": "KPI name or none"}],
  "summary": "one sentence: the single most likely way this project fails"}

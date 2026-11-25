@@ -18,6 +18,7 @@ VERDICTS = ('approve', 'changes_required')
 SEVERITIES = ('blocker', 'major', 'minor')
 BLOCKING = ('blocker', 'major')
 IMPACTS = ('fatal', 'severe', 'moderate')
+FINDING_CLASSES = ('kpi-blocking', 'hardening', 'out-of-scope')  # only the first is folded into a plan; the others are parked as ideas
 COSTS = ('high', 'mid', 'cheap', 'free')
 # Project directory and ticket-branch prefix (2026-11-23: renamed from `.autopilot/` and `autopilot/`). Projects
 # started before keep their `.autopilot/` until `bin/state migrate` moves it (never in the middle of a run), and
@@ -495,6 +496,21 @@ def git(cwd, *a):
     return subprocess.run(['git', '-C', cwd, *a], capture_output=True, text=True)
 
 
+STACK_SUBJECT = 'maxxfactory-stack '  # subject of the snapshot commit a stacked ticket starts on (bin/pipeline "Stacked starts")
+
+
+def stack_commit(wt, branch):
+    """The sha of the stack commit of a worktree (the newest commit of `branch..HEAD` whose subject starts with
+    STACK_SUBJECT), or None. A ticket started on its unmerged blocker carries that blocker's work as this one commit:
+    it is the base of the ticket's own diff (review, changed files) and is dropped when the blocker is merged."""
+    out = git(wt, 'log', '--format=%H%x09%s', '%s..HEAD' % branch).stdout
+    for line in out.splitlines():
+        sha, _, subj = line.partition('\t')
+        if subj.startswith(STACK_SUBJECT):
+            return sha
+    return None
+
+
 def is_git(cwd):
     return git(cwd, 'rev-parse', '--git-dir').returncode == 0
 
@@ -636,7 +652,9 @@ def validate_verdict(v):
 
 def validate_reasons(j):
     """Pre-mortem output -> (valid reasons, dropped count). A reason needs an id or title, an allowed impact and a
-    numeric probability in [0, 1]; anything else is dropped (reported, never merged)."""
+    numeric probability in [0, 1]; anything else is dropped (reported, never merged). There is no expected number of
+    reasons (2026-11-25: the prompts asked for "at most 10" and every list came back with exactly 10). `class`
+    (FINDING_CLASSES) defaults to kpi-blocking."""
     if not isinstance(j, dict) or j.get('verdict') != 'premortem' or not isinstance(j.get('reasons'), list):
         return None, 0
     good, dropped = [], 0
@@ -652,6 +670,8 @@ def validate_reasons(j):
             dropped += 1
             continue
         r = dict(r); r['probability'] = p
+        if r.get('class') not in FINDING_CLASSES:
+            r['class'] = 'kpi-blocking'  # an untagged reason is never parked silently
         r['id'] = str(r.get('id') or re.sub(r'[^a-z0-9]+', '-', str(r['title']).lower())[:40])
         r['title'] = str(r.get('title') or r['id'])
         for f in ('why', 'early_signal', 'guardrail', 'kpi_link', 'source'):
@@ -664,9 +684,15 @@ def validate_reasons(j):
 # ---------- tier policy (README "Tiers") ----------
 # Every roster entry has a `level` (0-4) and a `vendor`. Pools are not hand-ordered lists any more: each role allows
 # some levels (models.json `roles`, bounded by ROLES_ALLOWED) and `pool()` builds the candidates from the roster.
-#   Tier 0 frontier ceiling: never selected automatically (owner opt-in per run: run-model --allow-tier0 --model KEY).
-#   Tier 1 flagship: plan reviews, pre-mortems, milestone adversarial reviews, coordination. Never implements; reviews
-#          a ticket's code only as the logged backup when no Tier 2 reviewer is eligible and healthy (REVIEW_FALLBACK).
+#   Tier 0 frontier: the planning phase (2026-11-25): the planner session of /maxxfactory-plan and plan-more, and the
+#          plan roles (pre-mortem, plan review, milestone review), drawn before Tier 1. When no Tier 0 model of another
+#          vendor than the planner is eligible and healthy, a plan role takes a Tier 1 model instead of waiting, logged
+#          (run-model, state.json `tier_fallbacks`). models.json `"plan_tier0": false` keeps the plan roles on Tier 1.
+#          Any other role: never automatic (owner opt-in per run: run-model --allow-tier0 --model KEY).
+#   Tier 1 flagship: coordination of a run; the plan roles when no Tier 0 is eligible; the Express lane (2026-11-25):
+#          `express_implement` writes a small change in one worktree and `express_review` reviews its final diff (two
+#          reviewers of two vendors, in parallel). Outside Express it never implements, and reviews a ticket's code
+#          only as the logged backup when no Tier 2 reviewer is eligible and healthy (REVIEW_FALLBACK).
 #   Tier 2 balanced: ticket code reviews (two reviewers of distinct vendors); `escalate` implements rounds past
 #          `escalate_after_round` (run-model run_role, default 3).
 #   Tier 3 fast and cheap: ticket implementation and fix rounds up to `escalate_after_round`.
@@ -678,23 +704,25 @@ def validate_reasons(j):
 VENDOR_CLIS = {'anthropic': ('claude',), 'openai': ('codex',), 'google': ('agy',), 'mistral': ('vibe',), 'xai': ('grok',)}
 OTHER_VENDOR_CLIS = ('opencode', 'pi')
 LEVELS = (0, 1, 2, 3, 4)
-ROLES_DEFAULT = {'implement': [2], 'fix': [2], 'review': [2], 'plan_review': [1], 'premortem': [1], 'milestone_review': [1],
-                 'coordinate': [1], 'trivial': [4]}
-ROLES_ALLOWED = {'implement': {2, 3}, 'fix': {2, 3}, 'review': {2}, 'plan_review': {1}, 'premortem': {1}, 'milestone_review': {1},
-                 'coordinate': {1}, 'trivial': {3, 4}}
+ROLES_DEFAULT = {'implement': [2], 'fix': [2], 'review': [2], 'plan_review': [0, 1], 'premortem': [0, 1],
+                 'milestone_review': [0, 1], 'coordinate': [1], 'trivial': [4], 'express_implement': [1], 'express_review': [1]}
+ROLES_ALLOWED = {'implement': {2, 3}, 'fix': {2, 3}, 'review': {2}, 'plan_review': {0, 1}, 'premortem': {0, 1},
+                 'milestone_review': {0, 1}, 'coordinate': {1}, 'trivial': {3, 4}, 'express_implement': {1}, 'express_review': {1}}
 PLAN_ROLES = ('plan_review', 'premortem', 'milestone_review')  # review the planner's work: the planner's vendor is excluded
-REVIEW_ROLES = ('review',) + PLAN_ROLES                          # roles a `run-model run review` may take
+EXPRESS_ROLES = ('express_implement', 'express_review')         # the Express lane: Tier 1 writes, two Tier 1 vendors review
+REVIEW_ROLES = ('review', 'express_review') + PLAN_ROLES        # roles a `run-model run review` may take
 CHEAP_ROLES = ('implement', 'fix', 'trivial')                    # the coordinator's own account may take these, last
 # Policy: after escalation every Tier 2 model may have implemented a ticket. When no Tier 2
 # reviewer is eligible and healthy (or every one failed), bin/review draws the ticket reviewer from this role's tier
 # (Tier 1) instead of waiting: credit-weighted, never the coordinator's own account, never an implementer's model,
 # never an excluded or reserved account; logged in state.json `review_fallbacks` and on stderr. Plan roles have none.
-REVIEW_FALLBACK = {'review': 'plan_review'}
+REVIEW_FALLBACK = {'review': 'express_review'}  # a Tier 1 role (the plan roles now start at Tier 0, which never reviews ticket code)
 # Legacy pool names (before 2026-11-09) and the role they now mean. `escalate` = one level above implement, never Tier 1.
 POOL_ROLE = {'implement': 'implement', 'implement_critical': 'implement', 'fix': 'fix', 'fix_mid': 'fix',
              'implement_escalation': 'escalate', 'escalate': 'escalate', 'review': 'review', 'review_mid': 'review',
              'review_high': 'review', 'plan_review': 'plan_review', 'premortem': 'premortem',
-             'milestone_review': 'milestone_review', 'coordinate': 'coordinate', 'trivial': 'trivial'}
+             'milestone_review': 'milestone_review', 'coordinate': 'coordinate', 'trivial': 'trivial',
+             'express_implement': 'express_implement', 'express_review': 'express_review'}
 # subscription (gathered by /maxxfactory-init, never a default): paid (a plan the owner pays for), paid? (paid, plan not
 # confirmed), free (free plan, low limits), reserved (the owner keeps it for other uses: never selected). `excluded:
 # "<reason>"` on an entry, or a project's state.json `exclude` ({"<key>|<cli>/<account>|<cli>": "<reason>"}), removes
@@ -837,10 +865,18 @@ def roles(r):
             sys.exit('models.json roles: unknown role %r (known: %s)' % (role, ', '.join(ROLES_ALLOWED)))
         bad = sorted(set(lv) - ROLES_ALLOWED[role])
         if bad or not lv:
-            sys.exit('models.json roles.%s = %s breaks the tier policy (allowed: %s). Tier 0 is never automatic, Tier 1 only '
-                     'plans/pre-mortems/milestone reviews/coordinates, ticket reviews are Tier 2, implementation and fixes '
-                     'Tier 2 or Tier 3, Tier 4 only trivial tasks.' % (role, lv, sorted(ROLES_ALLOWED[role])))
+            sys.exit('models.json roles.%s = %s breaks the tier policy (allowed: %s). Tier 0 only takes the plan roles '
+                     '(pre-mortem, plan review, milestone review), Tier 1 coordinates, backs the plan roles up and runs '
+                     'the Express lane, ticket reviews are Tier 2, implementation and fixes Tier 2 or Tier 3, Tier 4 only '
+                     'trivial tasks.' % (role, lv, sorted(ROLES_ALLOWED[role])))
         out[role] = list(lv)
+    # Planning is Tier 0 first (2026-11-25). A models.json written before that date lists the plan roles as [1] (the
+    # old template default, not an owner's choice): Tier 0 is put in front of it. `"plan_tier0": false` keeps Tier 1.
+    for role in PLAN_ROLES:
+        if (r or {}).get('plan_tier0', True) is False:
+            out[role] = [x for x in out[role] if x != 0] or [1]
+        elif 0 not in out[role]:
+            out[role] = [0] + out[role]
     impl = min(out['implement'])
     out['escalate'] = [max(2, impl - 1)]  # one level up, never Tier 1
     return out
@@ -994,7 +1030,8 @@ def rng(r=None):
 
 def candidates(r, name, ad=None):
     """Every key that may take a role (or a legacy pool name): a valid, selectable entry (not `excluded`, not
-    `reserved`, not in the project's `exclude`) whose policy level is allowed for the role (Tier 0 never) and whose CLI is installed. Unordered."""
+    `reserved`, not in the project's `exclude`) whose policy level is allowed for the role (Tier 0: the plan roles only)
+    and whose CLI is installed. Unordered."""
     ad = ad if ad is not None else adapters()
     role = role_of(name)
     allowed = set(roles(r)[role])
@@ -1015,7 +1052,9 @@ def pool(r, name, ad=None, rand=None):
     cooling ones (earliest reset first), then the coordinator's own account last: only for cheap roles (implement,
     fix, trivial), and for Tier 1/2 roles only when the role has no other candidate at all. With models.json
     `coordinator_as_peer: true` (owner's choice) the coordinator's account is drawn like any other account in every
-    role. run-model still checks the coordinator's remaining quota (`coordinator_reserve`) before using it."""
+    role. run-model still checks the coordinator's remaining quota (`coordinator_reserve`) before using it.
+    A plan role (Tier 0, then Tier 1) keeps its tiers apart: every healthy Tier 0 candidate comes before the first
+    Tier 1 one, so Tier 1 runs only when no Tier 0 is eligible and healthy (the logged fallback)."""
     ad = ad if ad is not None else adapters()
     role = role_of(name)
     rand = rand or rng(r)
@@ -1039,6 +1078,8 @@ def pool(r, name, ad=None, rand=None):
             x -= w
             if x <= 0 or i == len(live) - 1:
                 order.append(k); live.pop(i); break
+    if role in PLAN_ROLES:  # stable: the weighted draw order is kept inside each tier
+        order.sort(key=lambda k: level_of(r, r['models'][k], ad[r['models'][k]['cli']]))
     order += [k for _, k in sorted(cooling)]
     if coord and (role in CHEAP_ROLES or not order):
         order += coord
@@ -1125,7 +1166,136 @@ def resolve_alert(repo, kind, key):
 
 TICKET_SIZES = {'XS': 0.5, 'S': 1.0, 'M': 2.0, 'L': 3.0, 'XL': 5.0}
 MAX_TICKET_UNITS = 2.0       # M: one concern, about 400 changed lines at most
+MAX_TICKET_LINES = 400       # the same cap in lines, for a ticket that declares `lines` (non-mechanical changed lines)
 MAX_TICKET_TOUCHES = 8       # files or modules one ticket may change
+# Mechanical work (2026-11-25): data files, deletions, renames, generated output and one-line repoints are not what
+# the size cap protects against (a reviewer reads a pattern, not every line). A ticket with `"mechanical": true` is
+# all of that kind: no size cap and no `touches` count cap. A mixed ticket declares `lines` (the lines someone has to
+# think about) and `mechanical_lines` (the rest): only `lines` counts. The plan review checks the claim.
+# Lanes (2026-11-25): the process is sized to the work before anything else runs (`spec_lane`, bin/milestone add).
+LANES = ('express', 'standard', 'full')
+EXPRESS_MAX_LINES = 600      # non-mechanical changed lines of the whole spec
+STANDARD_MAX_TICKETS = 5
+# A risk flag forces the Full lane whatever the size. `risk` in the spec declares them ([] when none applies; a spec
+# without the key is Full, as every spec was before lanes). The spec text is also scanned (fail closed): a hit the
+# planner did not declare counts as declared unless `risk_cleared` gives the reason it does not apply, flag by flag.
+RISK_FLAGS = {
+    'auth': r'\b(auth(entication|orization|n|z)?|log[- ]?in|sign[- ]?in|oauth|sso|saml|rbac|permissions?|access control|session cookie|jwt)\b',
+    'secrets': r'\b(secrets?|credentials?|passwords?|api[- ]keys?|private keys?|tokens?|\.env)\b',
+    'data-migration': r'\b(migrations?|migrate[sd]?|backfill|schema change|alter table|drop (table|column)|data loss)\b',
+    'payments': r'\b(payments?|billing|invoices?|checkout|charge[sd]?|refunds?|stripe|paddle)\b',
+    'irreversible': r'\b(dns|force[- ]push|production deploy|deploy(s|ed)? to prod(uction)?|send(s|ing)? (an? |the )?(e-?mails?|mails?|sms)|'
+                    r'publish(es|ed|ing)? (to|on) (npm|pypi|the store)|delete[sd]? (the )?(production|prod|customer|user) data|rm -rf)\b',
+}
+
+
+def spec_lane(spec):
+    """The lane of a milestone spec (or of a batch of tickets): how much process the work gets.
+
+      express   at most EXPRESS_MAX_LINES non-mechanical lines in all, every ticket sized in `lines`, no risk flag:
+                one ticket, one worktree, one Tier 1 implementer, the full checks, two Tier 1 reviewers of two
+                vendors on the final diff in parallel. No pre-mortem, no plan review.
+      standard  at most STANDARD_MAX_TICKETS tickets, no risk flag: plan review, no pre-mortem.
+      full      anything else, any risk flag, or a spec that does not declare `risk`: pre-mortem and plan review.
+
+    `"lane"` in the spec is the owner's override: a heavier lane is always taken; a lighter one needs `"lane_why"`
+    (it goes into the decision) and is refused while a risk flag is active.
+    Returns {'lane', 'computed', 'why': [..], 'lines', 'mechanical_lines', 'tickets', 'risk': [active flags],
+             'hints': {flag: matched text}, 'errors': [..]}."""
+    tickets = spec.get('tickets') or []
+    errors, why = [], []
+    declared = spec.get('risk')
+    cleared = spec.get('risk_cleared') or {}
+    if declared is not None and (not isinstance(declared, list) or any(x not in RISK_FLAGS for x in declared)):
+        errors.append('risk must be a list of %s ([] when none applies)' % ', '.join(RISK_FLAGS)); declared = None
+    if not isinstance(cleared, dict) or any(k not in RISK_FLAGS or not str(v or '').strip() for k, v in cleared.items()):
+        errors.append('risk_cleared maps a risk flag (%s) to the reason it does not apply' % ', '.join(RISK_FLAGS)); cleared = {}
+    text = '\n'.join([str(spec.get(k) or '') for k in ('name', 'description', 'why', 'plan')] +
+                     [str(t.get(k) or '') for t in tickets for k in ('title', 'description')])
+    hints = {}
+    for flag, rx in RISK_FLAGS.items():
+        m = re.search(rx, text, re.I)
+        if m and flag not in (declared or []) and flag not in cleared:
+            hints[flag] = m.group(0)
+    active = sorted(set(declared or []) | set(hints))
+    lines = mech = 0; unsized = []
+    for t in tickets:
+        for k in ('lines', 'mechanical_lines'):
+            v = t.get(k)
+            if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
+                errors.append('%s: %s must be a whole number of changed lines' % (t.get('slug'), k))
+        n = t.get('lines') if isinstance(t.get('lines'), int) and not isinstance(t.get('lines'), bool) else None
+        ml = t.get('mechanical_lines') if isinstance(t.get('mechanical_lines'), int) else 0
+        if t.get('mechanical') is True:
+            mech += (n or 0) + ml
+        else:
+            mech += ml
+            if n is None: unsized.append(str(t.get('slug')))
+            else: lines += n
+    if declared is None:
+        computed = 'full'; why.append('the spec declares no `risk` list (write "risk": [] when no flag applies)')
+    elif active:
+        computed = 'full'
+        why.append('risk flag%s: %s' % ('s' if len(active) > 1 else '', ', '.join(
+            '%s%s' % (f, (' (the text says "%s"; clear it in risk_cleared with the reason, or keep it)' % hints[f]) if f in hints else '')
+            for f in active)))
+    elif not unsized and lines <= EXPRESS_MAX_LINES:
+        computed = 'express'; why.append('%d non-mechanical lines (max %d), no risk flag' % (lines, EXPRESS_MAX_LINES))
+    elif len(tickets) <= STANDARD_MAX_TICKETS:
+        computed = 'standard'
+        why.append('%d ticket%s (max %d), no risk flag' % (len(tickets), '' if len(tickets) == 1 else 's', STANDARD_MAX_TICKETS)
+                   + ('; not express: %s' % ('no `lines` on %s' % ', '.join(unsized) if unsized else '%d non-mechanical lines (max %d)' % (lines, EXPRESS_MAX_LINES))))
+    else:
+        computed = 'full'; why.append('%d tickets (standard takes %d at most)' % (len(tickets), STANDARD_MAX_TICKETS))
+    lane = computed
+    want = spec.get('lane')
+    if want is not None:
+        if want not in LANES:
+            errors.append('lane must be one of %s' % ', '.join(LANES))
+        elif LANES.index(want) > LANES.index(computed):
+            lane = want; why.append('lane raised to %s in the spec' % want)
+        elif LANES.index(want) < LANES.index(computed):
+            if active or declared is None:
+                errors.append('lane %r is refused: %s' % (want, why[0]))
+            elif not str(spec.get('lane_why') or '').strip():
+                errors.append('lane %r is lighter than the computed lane %r: give the owner\'s reason in "lane_why"' % (want, computed))
+            elif want == 'express' and unsized:
+                errors.append('lane express needs `lines` on every ticket (missing: %s)' % ', '.join(unsized))
+            else:
+                lane = want; why.append('lane lowered to %s in the spec: %s' % (want, str(spec['lane_why']).strip()))
+    return {'lane': lane, 'computed': computed, 'why': why, 'lines': lines, 'mechanical_lines': mech,
+            'tickets': len(tickets), 'risk': active, 'hints': hints, 'errors': errors}
+
+
+def express_spec(spec):
+    """The spec of an Express change as the one ticket it runs as: the tickets of the spec become its ordered steps
+    (one implementer, one worktree, one review of the final diff). The step `CHECKS:` lines are joined into the
+    ticket's one `CHECKS:` line. Blockers outside the spec are kept."""
+    tickets = spec.get('tickets') or []
+    if len(tickets) == 1 and tickets[0].get('express'):
+        return spec
+    slugs = [t.get('slug') for t in tickets]
+    checks, fast, body = [], [], []
+    for i, t in enumerate(tickets, 1):
+        d = str(t.get('description') or '')
+        for key, acc in (('CHECKS', checks), ('CHECKS_FAST', fast)):
+            for m in re.finditer(r'^%s:(.*)$' % key, d, re.M):
+                if m.group(1).strip() and m.group(1).strip() not in acc: acc.append(m.group(1).strip())
+        d = re.sub(r'^(CHECKS(?:_FAST)?):', lambda m: 'Step check (%s):' % m.group(1).lower(), d, flags=re.M)
+        body.append('## Step %d: %s\n\n%s' % (i, t.get('title') or t.get('slug'), d.strip()))
+    head = ('Express lane: one change, done in the order of the steps below, in this one worktree. Finish each step '
+            'and run its check before the next one.\n\n')
+    desc = head + '\n\n'.join(body) + ('\n\nCHECKS: ' + ' && '.join('(%s)' % c for c in checks) if checks else '') \
+        + ('\nCHECKS_FAST: ' + ' && '.join('(%s)' % c for c in fast) if fast and len(fast) == len(tickets) else '')
+    one = {'slug': spec.get('id') or slugs[0], 'title': spec.get('batch') or spec.get('name') or slugs[0], 'description': desc,
+           'estimate': 'M', 'express': True, 'priority': min([t.get('priority', 3) for t in tickets] or [3]),
+           'lines': sum(t.get('lines') or 0 for t in tickets),
+           'touches': sorted({str(p) for t in tickets for p in (t.get('touches') or [])}),
+           'blocked_by': sorted({b for t in tickets for b in (t.get('blocked_by') or []) if b not in slugs}),
+           'labels': sorted({x for t in tickets for x in (t.get('labels') or [])})}
+    ideas = [t['from_idea'] for t in tickets if t.get('from_idea')]
+    if ideas: one['from_idea'] = ideas[0]
+    return dict(spec, tickets=[one])
 SHARED_DIR_SEGMENTS = {'tests', 'test', '__tests__', 'docs'}  # any path segment, not only the repo root
 SHARED_FILE_GLOBS = ('*.test.*', '*.spec.*', 'test_*.py', '*_test.py')
 SHARED_PREFIXES = ('e2e/artifacts',)  # side-by-side artifacts are not a collision
@@ -1231,14 +1401,21 @@ def ticket_shape_errors(tickets, deps=None):
             u = ticket_units(t.get('estimate', 1))
         except (TypeError, ValueError):
             continue  # the caller reports a bad estimate
-        if u > MAX_TICKET_UNITS:
+        # Mechanical tickets and the one ticket of an Express change are outside the size and touches caps (see above).
+        free = t.get('mechanical') is True or t.get('express') is True
+        if u > MAX_TICKET_UNITS and not free:
             errs.append(f'{s}: size {t.get("estimate")} is larger than M: split it into tickets of one concern '
-                        f'(about 400 changed lines each), chained with blocked_by where they share files')
+                        f'(about 400 changed lines each), chained with blocked_by where they share files; a ticket '
+                        f'that is only mechanical (data files, deletions, renames, one-line repoints) says "mechanical": true')
+        n = t.get('lines')
+        if isinstance(n, int) and not isinstance(n, bool) and n > MAX_TICKET_LINES and not free:
+            errs.append(f'{s}: {n} non-mechanical lines (max {MAX_TICKET_LINES}): split it; mechanical lines go in '
+                        f'`mechanical_lines` and do not count')
         touches = t.get('touches')
         if not isinstance(touches, list) or not [p for p in touches if str(p).strip()]:
             errs.append(f'{s}: `touches` is required: the files or modules this ticket changes (e.g. '
                         f'["api/app.py", "web/src/components/drawer/"])')
-        elif len(touches) > MAX_TICKET_TOUCHES:
+        elif len(touches) > MAX_TICKET_TOUCHES and not free:
             errs.append(f'{s}: touches {len(touches)} files or modules (max {MAX_TICKET_TOUCHES}): split it')
         # The pipeline runs a ticket's CHECKS line as a shell command; prose there ("just check (and the named
         # tests: x.py)") sent an approved ticket to triage on 2026-11-20 with a bash syntax error.
@@ -1455,7 +1632,7 @@ def gc_worktrees(repo, dry=False, now=None):
 # ETA that moved forward at every reading. Nothing said "stuck" or "waiting on you". The verdict is computed here,
 # from facts (state.json, the clock's lock, live jobs and processes), never from what the coordinator believes.
 
-PIPELINE_DRIVEN = ('starting', 'implement', 'merge', 'rebase', 'review', 'final')
+PIPELINE_DRIVEN = ('starting', 'implement', 'merge', 'rebase', 'review', 'final', 'stacked')
 RUN_STATES = ('RUNNING', 'DONE', 'STUCK', 'WAITING ON OWNER', 'STOPPED')
 
 
