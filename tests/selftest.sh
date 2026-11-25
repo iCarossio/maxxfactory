@@ -201,6 +201,24 @@ check "Express: implemented by a Tier 1 model (role express_implement), never on
 FAKE_BEHAVIOUR=implement $H/bin/run-model run implement "$B2" .autopilot/out/T-2-impl-1.md --cwd "$PWD" --role express_implement --model fk-f >/dev/null 2>&1; check "Express: a Tier 2 implementer refused" "$?" "4"
 git checkout -q -- tracked.txt
 check "Express: reviewers are Tier 1 only" "$(LV "$(POOL express_review)")" "[1]"
+# extra credits: declared by the owner per account, last resort for ticket roles, logged; never for planning.
+CRQ() { python3 -c "
+import json,os,sys,datetime as d;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p))
+for k in sys.argv[1:]: r['health'][k]={'until':(d.datetime.now(d.timezone.utc)+d.timedelta(hours=5)).isoformat(),'reason':'quota: test','set_at':d.datetime.now(d.timezone.utc).isoformat()}
+json.dump(r,open(p,'w'))" "$@"; }
+CRL() { python3 -c "
+import os,sys;sys.path.insert(0,os.environ['H']+'/bin');import autopilot_lib as l
+r=l.load_reg(warn=False);print(l.on_credits(r,'fk-f','review'), l.on_credits(r,'fk-f','plan_review'), l.on_credits(r,'fk-b','plan_review'), l.pool(r,'review')[-1])"; }
+CRQ fk-f fk-b
+check "out of quota without declared credits: not runnable" "$(CRL | cut -d' ' -f1-3)" "False False False"
+$H/bin/harness credits codex default on >/dev/null 2>&1; check "harness credits: refused without the owner's words" "$?" "1"
+$H/bin/harness credits codex default on --source 'owner: "use the extra credits of this account"' >/dev/null
+check "declared credits: a ticket role may run out of quota, after every live model; a plan role never" "$(CRL) $($H/bin/harness credits | grep -c '^codex/default .* on ')" "True False False fk-f 1"
+R=$(FAKE_BEHAVIOUR=approve $H/bin/run-model run review "$RB" .autopilot/out/cr.md --cwd "$PWD" --model fk-f 2>$SCR/cr2.err | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['status'],d.get('extra_credits'))")
+check "a run on extra credits is logged (stderr, state credit_runs)" "$R $(grep -c '^run-model: extra credits: review by fk-f on codex/default' $SCR/cr2.err) $($H/bin/state get credit_runs | python3 -c "import json,sys;e=json.load(sys.stdin)[-1];print(e['model'],e['role'])")" "ok True 1 fk-f review"
+CRQ fk-f; $H/bin/harness credits codex default off >/dev/null
+$H/bin/run-model run review "$RB" .autopilot/out/cr.md --cwd "$PWD" --model fk-f >/dev/null 2>&1; check "credits turned off: the model waits for its reset again" "$?" "2"
+python3 -c "import json,os;p=os.environ['AUTOPILOT_CONFIG_DIR']+'/models.json';r=json.load(open(p));r['health']={};r.pop('extra_credits',None);json.dump(r,open(p,'w'))"
 $H/bin/state del implementers.T-2 >/dev/null 2>&1
 B2=$($H/bin/mkbrief impl T-2 1 .autopilot/tickets/T-1.md)
 FAKE_BEHAVIOUR=implement $H/bin/run-model run implement "$B2" .autopilot/out/T-2-impl-1.md --cwd "$PWD" --model fk-f >/dev/null 2>&1; check "implement by a Tier 2 model refused" "$?" "4"

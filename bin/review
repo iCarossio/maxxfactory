@@ -116,7 +116,10 @@ def chain(reg):
             order = other + [x for x in order if x not in other]
         dry = [x for x in order if lib.credit_left(reg, lib.account_key(reg['models'][x], ad.get(reg['models'][x]['cli']))) == 0]
         head += [x for x in order if x not in dry]; spent += dry
-    return head + spent
+    # Last resort for ticket code (lib "Extra credits"): reviewers out of subscription quota on an account whose extra
+    # credits the owner declared, after every healthy reviewer of both tiers.
+    credit = [x for x in lib.pool(reg, ROLE, ad) if x not in EX and x not in head + spent and lib.on_credits(reg, x, ROLE, ad)]
+    return head + spent + credit
 
 
 def vendor(reg, x):
@@ -209,7 +212,7 @@ while pick:
     if changes or approvals >= MIN:
         break
     reg = lib.load_reg(warn=False)
-    pick = take(reg, [x for x in order if x not in tried and x in reg['models'] and lib.healthy(reg, x)], MIN - approvals, voted)
+    pick = take(reg, [x for x in order if x not in tried and x in reg['models'] and lib.runnable(reg, x, ROLE, ad)], MIN - approvals, voted)
     if pick:
         print(f'RETRY: no usable verdict from {", ".join(failed)}; next eligible reviewer(s): {", ".join(pick)}', flush=True)
 open(os.path.join(OUT, f'{iss}-findings-{n}.md'), 'w').write('\n'.join(blocking) or '(none)')

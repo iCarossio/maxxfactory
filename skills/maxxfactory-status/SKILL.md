@@ -32,4 +32,4 @@ Show the table as printed, then at most three lines: any window at 90% or more w
 
 - Never guess a reset or a percentage: if the probe says unknown, say unknown.
 - `bin/run-model status` is read only; only `usage --apply` and `reset` change state, and only when the user asks.
-- Never buy credits or top up: a tier out of quota waits for its reset.
+- Never buy credits or top up: a tier out of quota waits for its reset. Accounts whose extra credits the owner declared (`bin/harness credits`) are the last resort for ticket work only (Express tickets included).

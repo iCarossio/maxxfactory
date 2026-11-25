@@ -6,6 +6,9 @@
                                                        # speed variants ('-fast' ids) are dropped unless the owner passes --allow-fast
   harness discover                                     # CLIs with a real executable on PATH (a shell alias/function does not count), adapters, accounts on disk
   harness list                                         # roster table: key, cli, model, account, vendor, tier, subscription, roles, health
+  harness credits [<cli> <account> on --source "<owner's words>" [--until DATE] | <cli> <account> off]
+                                                       # extra credits the owner already holds on an account: last resort for ticket
+                                                       # implementation, fixes and code reviews; never bought by the runtime
   harness check                                        # the policy summary: role -> candidates (tier, account, subscription, health), then
                                                        # every missing piece with what to do; exit 1 when something blocks a role or an entry is refused
   harness logins [--min-hours N] [--json]              # every account the run depends on (roster + coordinator): logged in or not, and when
@@ -461,6 +464,38 @@ def cmd_subscription(args):
     print('updated: %s' % ', '.join(lib.update_reg(fn)))
 
 
+def cmd_credits(args):
+    """harness credits                                  list the accounts with declared extra credits
+    harness credits <cli> <account> on --source "<the owner's words>" [--until YYYY-MM-DD[THH:MM]]
+    harness credits <cli> <account> off
+    Extra credits the owner already holds on an account (lib "Extra credits"): used as the last resort for ticket
+    implementation, fixes and code reviews, when no healthy model of the role is left. Never bought by the runtime."""
+    ad = lib.adapters()
+    if not args:
+        r = lib.load_reg(warn=False); live = lib.credit_accounts(r)
+        for acct, e in (r.get('extra_credits') or {}).items():
+            print('%-50s %s  until %s  <- %s' % (acct, 'on ' if acct in live else 'expired', (e or {}).get('until') or 'turned off', (e or {}).get('source', '')))
+        if not r.get('extra_credits'): print('no account with declared extra credits')
+        return
+    if len(args) < 3 or args[2] not in ('on', 'off'): sys.exit(cmd_credits.__doc__)
+    cli, account, sw = args[0], args[1], args[2]
+    src = opt(args, '--source'); until = opt(args, '--until')
+    if sw == 'on' and not src: sys.exit('harness credits: --source "<the owner\'s words>" is required: only the owner declares credits')
+    if until:
+        try: until = dt.datetime.fromisoformat(until + ('T23:59:59' if 'T' not in until else '')).astimezone().isoformat()
+        except ValueError: sys.exit('harness credits: --until takes YYYY-MM-DD or YYYY-MM-DDTHH:MM')
+
+    def fn(r):
+        ks = account_keys(r, ad, cli, account)
+        if not ks: sys.exit(f'harness credits: no roster key on {cli} account {account} (harness list shows the accounts)')
+        acct = lib.account_key(r['models'][ks[0]], ad[cli])
+        if sw == 'on': r.setdefault('extra_credits', {})[acct] = {'until': until, 'source': src, 'set': today()}
+        else: (r.get('extra_credits') or {}).pop(acct, None)
+        r['changelog'].append({'date': today(), 'change': f'extra credits {acct} {sw}' + (f' until {until}' if until else '')})
+        return acct
+    print('extra credits %s: %s' % (sw, lib.update_reg(fn)))
+
+
 def cmd_whoami(args):
     """The coordinator account detected for this process (adapter `coordinator_env` + `account_env`, or
     $AUTOPILOT_COORDINATOR) and the roster keys on it: they become last resort, cheap roles only, quota-guarded."""
@@ -560,6 +595,6 @@ if __name__ == '__main__':
     a = sys.argv[1:]
     cmds = {'init': cmd_init, 'discover': cmd_discover, 'list': cmd_list, 'add-model': cmd_add_model, 'add-account': cmd_add_account,
             'set-home': cmd_set_home, 'remove': cmd_remove, 'new': cmd_new, 'pools': cmd_pools, 'adapters': cmd_adapters,
-            'check': cmd_check, 'logins': cmd_logins, 'migrate': cmd_migrate, 'subscription': cmd_subscription, 'whoami': cmd_whoami, 'set': cmd_set}
+            'check': cmd_check, 'logins': cmd_logins, 'migrate': cmd_migrate, 'subscription': cmd_subscription, 'whoami': cmd_whoami, 'set': cmd_set, 'credits': cmd_credits}
     if not a or a[0] not in cmds: print(__doc__); sys.exit(1)
     cmds[a[0]](a[1:])

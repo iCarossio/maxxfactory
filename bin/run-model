@@ -414,16 +414,17 @@ def cmd_run(args):
                               'reason': 'implemented or planned this ticket (same underlying model on any account or harness), or an excluded vendor'})); sys.exit(4)
         keys = [k]
     else:
-        keys = [k for k in lib.pool(r, role, ad) if lib.healthy(r, k) and k not in excluded]
+        keys = [k for k in lib.pool(r, role, ad) if lib.runnable(r, k, role, ad) and k not in excluded]
         if '--prefer' in args:  # put one model first but keep the rest as fallback (spreads parallel runs)
             pk = args[args.index('--prefer') + 1]
             if pk in keys: keys = [pk] + [k for k in keys if k != pk]
     tried = []
     critical_check(repo)  # the coordinator sees a vendor outage on every run, not only at the heartbeat
     for k in keys:
-        if k not in r['models'] or not lib.healthy(r, k) or k in excluded:  # roster edited or cooled down while this run was going
+        if k not in r['models'] or not lib.runnable(r, k, role, ad) or k in excluded:  # roster edited or cooled down while this run was going
             continue
         m = r['models'][k]; a = ad.get(m['cli'])
+        credits = lib.on_credits(r, k, role, ad)  # last resort: the owner's declared extra credits (lib "Extra credits")
         allowed = os.environ.get('ALLOW_IMPLEMENT', '').split(',')  # explicit per-session user exception
         if kind == 'implement' and m.get('no_implement') and k not in allowed:
             tried.append(f"{k}:no_implement"); continue
@@ -434,7 +435,7 @@ def cmd_run(args):
             if '--model' in args:
                 refuse(role, issue, 'owner account cap: ' + whyc, status='account_cap', model=k)
             continue
-        if lib.on_coordinator_account(r, m, a):
+        if lib.on_coordinator_account(r, m, a) and not credits:  # on credits the subscription window is already spent
             ok, why = coordinator_guard(r, ad, k)
             if not ok:
                 tried.append(f'{k}:coordinator_reserve')
@@ -450,6 +451,12 @@ def cmd_run(args):
                 print(json.dumps({'status': 'error', 'role': role, 'reason': 'implement runs need a ticket identity: --issue <ID> or a brief named <ISSUE>-impl-<n>.md inside a project with .maxxfactory/state.json'})); sys.exit(4)
             lib.record_implementer(repo, issue, k, m, a or lib.adapter_of(m))
         acct = lib.account_key(m, a)
+        if credits:
+            print('run-model: extra credits: %s by %s on %s (no healthy model of the role left; declared by the owner: %s)'
+                  % (role, k, acct, str(lib.credit_accounts(r).get(acct, {}).get('source') or '')[:120]), file=sys.stderr)
+            if repo:
+                lib.update_state(repo, lambda st: st.setdefault('credit_runs', []).append(
+                    {'at': now().isoformat(), 'role': role, 'issue': issue, 'model': k, 'account': acct}))
         if role in lib.PLAN_ROLES and 0 in levels and lib.level_of(r, m, a) != 0:
             # Planning is Tier 0 first: a lower tier runs only when no Tier 0 model is eligible, and it is logged.
             print('run-model: tier fallback: %s by %s (Tier %s): no eligible Tier 0 model of another vendor than the planner'
@@ -460,6 +467,10 @@ def cmd_run(args):
         lib.update_reg(lambda rr: rr.setdefault('last_used', {}).__setitem__(acct, now().isoformat()))
         res = run_one(r, k, 'implement' if kind == 'implement' else 'review', brief, out, cwd); tried.append(f"{k}:{res['status']}")
         res['level'] = lib.level_of(r, m, a); res['run_role'] = role
+        if credits:
+            res['extra_credits'] = True
+            if res['status'] == 'quota':  # the credits are not there: wait for the reset like any other model
+                lib.update_reg(lambda rr, k=k: rr['health'].get(k, {}).__setitem__('credits_failed', True) if k in rr['health'] else None)
         if rnd: res['round'] = rnd
         if res['status'] == 'quota':
             after_quota(k, repo)

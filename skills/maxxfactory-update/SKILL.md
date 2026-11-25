@@ -53,7 +53,7 @@ On a contradiction or a break, ask the owner before editing anything that depend
 
 - The behaviour the owner's request names as wrong is already decided: replace it, and say so in the report. Everything else the change collides with is theirs to decide.
 - Never: delete or reword a rule silently, leave two texts that contradict each other, or change a test's expectation to make it pass (that is replacing a rule: ask).
-- The safety rules are never weakened without the owner's explicit words in this conversation: no paid credits or plans, no work destroyed, the coordinator's account protected, implementer and reviewer different models, nothing created before the owner's approval, no outward action that was not pre-authorized.
+- The safety rules are never weakened without the owner's explicit words in this conversation: nothing bought (credits the owner declared with `bin/harness credits` are used last, never more), no work destroyed, the coordinator's account protected, implementer and reviewer different models, nothing created before the owner's approval, no outward action that was not pre-authorized.
 
 ## 4. Apply
 

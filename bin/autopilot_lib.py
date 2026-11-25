@@ -371,6 +371,47 @@ def healthy(r, key):
     return not h or parse_time(h['until']) < now()
 
 
+# Extra credits (2026-11-25). The runtime never buys anything. But an owner may hold credits already (extra usage on a
+# plan, a credit grant): models.json `extra_credits` {"<cli>/<account>": {"until": "<ISO time>" | null, "source":
+# "<the owner's words>"}} (bin/harness credits) declares the accounts that have some. They are the last resort, for
+# ticket work only (CREDIT_ROLES: the Tier 2 ticket roles and the Tier 1 roles of the Express lane): a model whose subscription quota is exhausted (a cooldown whose reason starts with
+# `quota`) on such an account may still run when no healthy model of the role is left, after the Tier 1 backup for a
+# review. Each such run is logged (stderr, state.json `credit_runs`). A run that still answers "quota" marks the
+# cooldown `credits_failed`: the credits are not there, the model waits for its reset like any other.
+CREDIT_ROLES = ('implement', 'fix', 'escalate', 'review', 'express_implement', 'express_review')  # ticket work, Express included
+
+
+def credit_accounts(r):
+    """{account key: entry} of the accounts whose extra credits the owner declared usable now."""
+    out = {}
+    for acct, e in ((r or {}).get('extra_credits') or {}).items():
+        e = e if isinstance(e, dict) else {}
+        try:
+            if e.get('until') and parse_time(e['until']) < now():
+                continue
+        except (ValueError, TypeError):
+            continue
+        out[acct] = e
+    return out
+
+
+def on_credits(r, key, role, ad=None):
+    """True when `key` could run this role on the owner's extra credits: out of subscription quota, on a declared account."""
+    if role not in CREDIT_ROLES or healthy(r, key):
+        return False
+    m = (r.get('models') or {}).get(key); h = r['health'].get(key) or {}
+    if not m or h.get('credits_failed') or not str(h.get('reason') or '').startswith('quota'):
+        return False
+    ad = ad if ad is not None else adapters()
+    a = ad.get(m.get('cli'))
+    return bool(a) and account_key(m, a) in credit_accounts(r)
+
+
+def runnable(r, key, role, ad=None):
+    """Healthy, or out of quota on an account with declared extra credits (last resort, ticket roles only)."""
+    return healthy(r, key) or on_credits(r, key, role, ad)
+
+
 def cool(key, reason, minutes=None, windows=None):
     """windows: the quota windows responsible (e.g. ['5h', 'weekly']); a cooldown is cleared by `usage --apply` only
     when a newer below-quota reading covers every one of them."""
@@ -1059,14 +1100,16 @@ def pool(r, name, ad=None, rand=None):
     role = role_of(name)
     rand = rand or rng(r)
     t = now()
-    live, cooling, coord = [], [], []
+    live, cooling, coord, credit = [], [], [], []
     pcap = project_capacities()
     for k in candidates(r, name, ad):
         m = r['models'][k]; a = ad[m['cli']]
         if on_coordinator_account(r, m, a) and not r.get('coordinator_as_peer'):
             coord.append(k); continue
         h = r.get('health', {}).get(k)
-        if h and parse_time(h['until']) > t:
+        if h and parse_time(h['until']) > t and on_credits(r, k, role, ad):
+            credit.append(k)  # out of quota, but the owner declared extra credits on this account: after every live model
+        elif h and parse_time(h['until']) > t:
             cooling.append((h['until'], k))
         else:
             live.append((weight(r, m, account_key(m, a), pcap.get(k), a), k))
@@ -1080,7 +1123,7 @@ def pool(r, name, ad=None, rand=None):
                 order.append(k); live.pop(i); break
     if role in PLAN_ROLES:  # stable: the weighted draw order is kept inside each tier
         order.sort(key=lambda k: level_of(r, r['models'][k], ad[r['models'][k]['cli']]))
-    order += [k for _, k in sorted(cooling)]
+    order += credit + [k for _, k in sorted(cooling)]
     if coord and (role in CHEAP_ROLES or not order):
         order += coord
     return order

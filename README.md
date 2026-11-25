@@ -46,6 +46,7 @@ maxxfactory exists because cheap models write good code when the work is planned
 - **Measurable and atomic tickets.** One ticket is one concern, about 400 changed lines at most (mechanical lines aside), one commit, with the files it touches declared so parallel tickets never collide. Bigger is split, tiny is grouped.
 - **Model convergence.** A ticket loops implement → review → fix until the reviewer approves. After round 3 the implementer is escalated (a fresh Tier 2 model, or one tier up for a project pinned to Tier 3) instead of looping on the same mistakes. A review counts only if it parses, did not touch the code, and an "approve" carries no blocking finding.
 - **Long autonomous sessions.** A run lasts hours with you away. State lives on disk and in Linear, not in the conversation, so a new or compacted session resumes exactly (`/maxxfactory-continue`). Every change of plan is logged with its source (`bin/decision`). You are interrupted only for a CRITICAL alert.
+- **Extra credits last.** Credits the owner already holds on an account, and declares, are used only when a ticket has no healthy model of its tier left, and each use is logged. Nothing is ever bought.
 - **Spend what you pay for, never more.** Inside a tier, models are drawn by the credit left on each subscription, so every plan is used before its reset. Quota resets are reused the minute they happen; credits are never bought.
 
 ## Tiers
