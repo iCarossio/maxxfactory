@@ -391,14 +391,18 @@ blockers = S.get('blockers', {})
 pushed = []
 
 
+finished = set()  # each ticket is settled once: without it the walk repeats every path of a dense graph (hours on 800 relations)
+
+
 def finish(t, seen=()):
-    if t in seen or t not in item_end:
+    if t in finished or t in seen or t not in item_end:
         return item_end.get(t, 0.0)
     after = [finish(b, seen + (t,)) for b in blockers.get(t, []) if b in item_end]
     floor = max(after) + minutes(t) if after else 0.0
     if floor > item_end[t] + 1:
         item_end[t] = floor
         pushed.append(t)
+    finished.add(t)
     return item_end[t]
 
 
