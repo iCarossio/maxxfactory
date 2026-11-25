@@ -1181,7 +1181,10 @@ STANDARD_MAX_TICKETS = 5
 # planner did not declare counts as declared unless `risk_cleared` gives the reason it does not apply, flag by flag.
 RISK_FLAGS = {
     'auth': r'\b(auth(entication|orization|n|z)?|log[- ]?in|sign[- ]?in|oauth|sso|saml|rbac|permissions?|access control|session cookie|jwt)\b',
-    'secrets': r'\b(secrets?|credentials?|passwords?|api[- ]keys?|private keys?|tokens?|\.env)\b',
+    # "tokens" alone is not a hit (design tokens, LLM tokens): a credential token is named with its kind, or as an
+    # environment variable (FOO_TOKEN), which is matched case-sensitively.
+    'secrets': r'\b(secrets?|credentials?|passwords?|api[- ]keys?|private keys?|(access|api|auth|bearer|refresh|session|personal access) tokens?|\.env)\b'
+               r'|(?-i:\b[A-Z0-9_]*(TOKEN|SECRET|API_KEY|PASSWORD)[A-Z0-9_]*\b)',
     'data-migration': r'\b(migrations?|migrate[sd]?|backfill|schema change|alter table|drop (table|column)|data loss)\b',
     'payments': r'\b(payments?|billing|invoices?|checkout|charge[sd]?|refunds?|stripe|paddle)\b',
     'irreversible': r'\b(dns|force[- ]push|production deploy|deploy(s|ed)? to prod(uction)?|send(s|ing)? (an? |the )?(e-?mails?|mails?|sms)|'

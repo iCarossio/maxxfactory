@@ -63,7 +63,8 @@ branch: the ticket is never approved nor merged before its blocker is merged, th
 what the blocker's fix rounds changed meets the ticket's work in that rebase (a conflict is a merge round).
 Express lane (2026-11-25): a ticket listed in state.json `lanes` as `express` (written by `bin/milestone add` for a
 small change with no risk flag) is implemented by a Tier 1 model (role express_implement, every round) and each
-review is two Tier 1 reviewers of two vendors, none the implementer's, in parallel (role express_review).
+review is two Tier 1 reviewers of two vendors, none the implementer's, in parallel (role express_review); when only
+one such vendor is eligible, that one reviews and the round does not wait (`express_min_reviews`: 2 to wait for both).
 New worktrees get the dependency directories of the main checkout (`clone_dirs`, default node_modules) as a
 copy-on-write clone when the lockfiles next to them are identical; the `setup` command then sees
 MAXXFACTORY_DEPS_CLONED=1 and can skip its install.
@@ -105,7 +106,11 @@ DEFAULTS = {'interval': 60, 'max_jobs': 3, 'max_rounds': 5, 'max_merges': 3, 're
             'reserved_paths': '',     # regex of paths the loop never grants (e.g. `(^|/)package(-lock)?\\.json$`)
             'attention_minutes': 20,  # triage, stuck or approved left unanswered this long: CRITICAL alert (0: never)
             'stack': True,            # a ticket starts on its one unmerged blocker once that blocker's checks passed
-            'clone_dirs': 'node_modules'}  # dependency dirs cloned (copy-on-write) from the main checkout into a new worktree
+            'clone_dirs': 'node_modules',
+            # Express review: two Tier 1 reviewers of two vendors run at once when two are eligible; with 1 (default) the
+            # review does not wait for a second vendor that is out of quota (one reviewer of another vendor than the
+            # implementer then decides, as for any ticket); 2 waits for both.
+            'express_min_reviews': 1}  # dependency dirs cloned (copy-on-write) from the main checkout into a new worktree
 DRIVEN = ('implement', 'merge', 'rebase', 'review', 'final', 'stacked')
 LOCKFILES = ('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock', 'npm-shrinkwrap.json')
 SHARED = re.compile(r'(^|/)(tests?|__tests__|docs)(/|$)|\.(test|spec)\.|(^|/)test_[^/]*\.py$|_test\.py$')
@@ -1206,7 +1211,8 @@ def cmd_job(t, r, review_only, final=False):
         # Express lane: the final diff is read by two Tier 1 reviewers of two vendors at once (bin/review runs them in parallel).
         express = v.get('lane') == 'express'
         rc = subprocess.run([tool('review'), t, str(r), brief, '2' if express else '1'], cwd=M,
-                            env=env(WT=wt, POOL=v.get('pool') or ('express_review' if express else None)),
+                            env=env(WT=wt, POOL=v.get('pool') or ('express_review' if express else None),
+                                    MIN_REVIEWS=str(max(1, min(2, int(c.get('express_min_reviews') or 1)))) if express else None),
                             stdin=subprocess.DEVNULL, stdout=rv, stderr=subprocess.STDOUT).returncode
     mark('REVIEW_RC %s' % rc); mark('DONE')
 

@@ -17,7 +17,7 @@ The process is sized to the work before any question, review or ticket. Long bef
 
 | Lane | When (computed by `lib.spec_lane`, never by you) | What runs |
 |---|---|---|
-| **Express** | at most 600 non-mechanical changed lines in all, every ticket sized in `lines`, no risk flag | No pre-mortem, no plan review, no per-ticket plan review. The tickets of the spec become the ordered steps of one ticket: one worktree, one Tier 1 implementer (role `express_implement`), the full checks, then two Tier 1 reviewers of two vendors, neither the implementer's, reading the final diff in parallel. The owner still approves before anything is created. |
+| **Express** | at most 600 non-mechanical changed lines in all, every ticket sized in `lines`, no risk flag | No pre-mortem, no plan review, no per-ticket plan review. The tickets of the spec become the ordered steps of one ticket: one worktree, one Tier 1 implementer (role `express_implement`), the full checks, then two Tier 1 reviewers of two vendors, neither the implementer's, reading the final diff in parallel (when only one such vendor has quota, that one reviews and nothing waits; `pipeline.express_min_reviews: 2` waits for both). Before proposing Express, look at `bin/run-model pool express_implement` and `express_review`: say so when fewer than three Tier 1 vendors are live. The owner still approves before anything is created. |
 | **Standard** | at most 5 tickets, no risk flag | Plan review only, then the pipeline. |
 | **Full** | anything else, any risk flag, or a spec without `risk` | Pre-mortem and plan review, then the pipeline: everything below. |
 

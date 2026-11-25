@@ -150,6 +150,8 @@ while len(pick) < MIN:
                     {'role': ROLE, 'issue': iss, 'round': n, 'excluded': sorted(EX), 'ready': ready.isoformat() if ready else None})
     print(f'NO_REVIEWER: {msg}'); sys.exit(2)
 lib.resolve_alert(M, 'review_blocked', f'{ROLE}-{iss}')
+if len(pick) < k:
+    print(f'review: {len(pick)} of {k} reviewers for {iss} round {n}: no other eligible healthy vendor now (MIN_REVIEWS={MIN})', file=sys.stderr, flush=True)
 
 
 def run(x):
