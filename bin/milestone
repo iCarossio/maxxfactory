@@ -21,6 +21,7 @@ and their Linear milestone never gets a target date.
   milestone sync [--decision D-n]... [--dry-run]
   milestone tidy [--dry-run]             delete empty milestones the plan dropped, archive empty autopilot projects, sync ticket states
   milestone proposed [--drop ID]         list (or drop) milestones drafted but not approved; bin/eta shows them
+  milestone parts <spec.json | tickets.json> [--apply]   the groups of tickets that are safe for the Express lane (see "Express parts")
   milestone whatif --out PATH           state with every proposed milestone added (used by bin/eta)
 
 add: extends a running project with a milestone, in this order, never skipping a step without a logged flag:
@@ -56,6 +57,17 @@ Lanes (2026-11-25, `lib.spec_lane`): the first thing `add` does is size the work
   forces Full. "lane" overrides: heavier always; lighter needs "lane_why" and no active risk flag.
   --dry-run prints the lane, why, and the ETA of every lane the spec could take, so the owner chooses before any
   review is paid for. The lane and its reason go into the decision.
+Express parts (2026-11-25, `lib.express_parts`): a Standard or Full plan keeps its reviews, and the groups of its
+  tickets that are safe for Express run as one Express ticket each. A part is two or more tickets linked by
+  blocked_by, all of one milestone, each sized in "lines" (or mechanical), none carrying a risk flag (its own
+  "risk": [...], or its text) nor promoting an idea, at most 600 non-mechanical lines together, and whose merge
+  creates no dependency cycle. A plan without "risk", or with a declared flag that no ticket carries, has no part.
+  --dry-run lists the parts and what each skipped ticket lacks. They apply only when the spec says
+  "express_parts": "auto" (or a list of slug lists, checked against the same rules): each part becomes the ticket
+  `xp-<first slug>`, the other tickets' blockers follow, and state.json `lanes` marks it express. The reviewers are
+  told the parts; an unsafe one is a major finding.
+  milestone parts <spec.json | tickets.json> [--apply]   the same for a file: prints the parts; --apply rewrites the
+  file with them merged (a new project's tickets.json before `bin/linear import`; `seed` then records the lanes).
 Rehearsal (2026-11-25): before any model review (b, c) and before an Express approval, the spec must hold
   "rehearsal": {"cmd": "<what was run>", "result": "<what happened: failing checks, counts, files>"}: the planner
   applies the cheapest destructive version of the change in a scratch worktree (`pipeline wt <name> --detach`) and
@@ -568,12 +580,44 @@ def make_review_worktree(repo, mid):
     return wt
 
 
-def lane_etas(repo, st, mid, full_spec, lane):
+def parts_lines(parts, applied, lane=None, by=None):
+    """The Express parts of a plan, for the owner: the groups, and what each skipped ticket lacks."""
+    if lane and lane['lane'] == 'express': return []
+    out = []
+    if parts.get('why'): return [f'Express parts: none ({parts["why"]})']
+    if not parts['parts']:
+        out.append('Express parts: none (no group of two or more linked tickets is safe for Express)')
+    else:
+        out.append('Express parts (%s):' % ('applied: each runs as one Express ticket' if applied else
+                                           'safe for Express; add "express_parts": "auto" to the spec to run them so'))
+        out += [f'  xp-{g[0]}: {", ".join(g)}' for g in parts['parts']]
+    if parts['skipped']:
+        out.append('  not eligible: ' + '; '.join(f'{s} ({w})' for s, w in parts['skipped'].items()))
+    return out
+
+
+def cmd_parts(a):
+    try: spec = lib.read_json(a.file)
+    except (OSError, ValueError) as ex: die(f'cannot read {a.file}: {ex}')
+    want = spec.get('express_parts')
+    parts = lib.express_parts(spec, want if isinstance(want, list) else None)
+    for e in parts['errors']: print(f'INVALID: {e}')
+    if parts['errors']: sys.exit(1)
+    for line in parts_lines(parts, a.apply): print(line)
+    if a.apply and parts['parts']:
+        new = lib.apply_express_parts(spec, parts['parts']); new.pop('express_parts', None)
+        errs = lib.ticket_shape_errors(new['tickets'])
+        if errs: die('the merged tickets are not valid: ' + '; '.join(errs))
+        write_text(a.file, json.dumps(new, indent=1) + '\n')
+        print(f'{a.file}: {len(spec["tickets"])} tickets -> {len(new["tickets"])}')
+
+
+def lane_etas(repo, st, mid, full_spec, lane, applied=None):
     """[(lane name, text)] for every lane the spec could take (its computed lane and the heavier ones): the ETA of
     the milestone on a what-if schedule, plus the allowance for that lane's planning reviews."""
     out = []
     for name in lib.LANES[lib.LANES.index(lane['computed']):]:
-        sp = lib.express_spec(full_spec) if name == 'express' else full_spec
+        sp = lib.express_spec(full_spec) if name == 'express' else (applied or full_spec)  # `applied`: Express parts merged
         errs, resolved = validate(sp, st, repo, mid)
         if errs:
             out.append((name, f'not valid as {len(sp["tickets"])} tickets: {errs[0]}')); continue
@@ -630,7 +674,15 @@ def cmd_add(a):
         for e in lane['errors']: print(f'INVALID: {e}')
         sys.exit(1)
     full_spec = spec
+    parts = {'parts': [], 'skipped': {}, 'errors': [], 'why': None}
+    want_parts = spec.get('express_parts')
     if lane['lane'] == 'express': spec = lib.express_spec(spec)  # the tickets become the steps of one ticket
+    else:  # a bigger plan: the sub-parts that are safe for Express (applied only when the spec opts in)
+        parts = lib.express_parts(spec, want_parts if isinstance(want_parts, list) else None)
+        if parts['errors']:
+            for e in parts['errors']: print(f'INVALID: {e}')
+            sys.exit(1)
+        if want_parts and parts['parts']: spec = lib.apply_express_parts(spec, parts['parts'])
     what = f'{len(spec.get("tickets") or [])} tickets into milestone {spec["name"]!r}' if into else None
     mid = spec.get('id') or re.sub(r'[^a-z0-9]+', '-', (spec.get('name') or '').lower()).strip('-')
     d = lib.pdir(repo, 'plan', 'milestones', mid)
@@ -663,8 +715,9 @@ def cmd_add(a):
         show_schedule(w['stages'], w['critical_path'])
         for x in warnings: print(f'  warning: {x}')
         print(lane_line(lane))
-        for name, text in lane_etas(repo, st, mid, full_spec, lane):
+        for name, text in lane_etas(repo, st, mid, full_spec, lane, spec if want_parts and parts['parts'] else None):
             print(f'  {"->" if name == lane["lane"] else "  "} {name:<9} {text}')
+        for line in parts_lines(parts, bool(want_parts), lane): print(line)
         if rehearsal_of(spec)[0] is None: print('  warning: no "rehearsal" yet: the real add refuses to start a review without it')
         with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
             json.dump(w, f)
@@ -704,6 +757,12 @@ def cmd_add(a):
     status['rehearsal'] = {'skipped': rh_text} if rh_kind == 'skipped' else {'given': rh_kind == 'ok'}
     facts = (f'{lane_line(lane)} Scale the review to that size: give the findings that are real, however few; do not pad '
              'the list, and do not ask for more process than the lane has.\n\n'
+             + (('Express parts: the tickets ' + ', '.join(t['slug'] for t in spec['tickets'] if t.get('express')) + ' each merge '
+                 'several small tickets (their steps) and will run on the Express lane: one Tier 1 implementer, two Tier 1 '
+                 'reviewers on the final diff, no plan review of their own. Check each one: steps that carry a risk (auth, '
+                 'secrets, data migration, payments, an irreversible outward action), that are not small, or that do not '
+                 'belong together make it unsafe for Express: a major finding, name the ticket to take out.\n\n')
+                if lane['lane'] != 'express' and any(t.get('express') for t in spec['tickets']) else '')
              + ('The rehearsal in the section below was run by the planner on this repository: treat its result as settled '
                 'and look for what a run cannot find.\n\n' if rh_kind == 'ok' else f'No rehearsal was run ({rh_text}).\n\n'))
     review_wt = None
@@ -796,6 +855,8 @@ def cmd_add(a):
     if not status.get('decision'):
         skipped = [f'{k} skipped: {status[k]["skipped"]}' for k in ('premortem', 'review') if status[k].get('skipped')]
         if status.get('rehearsal', {}).get('skipped'): skipped.append(f'rehearsal skipped: {status["rehearsal"]["skipped"]}')
+        xp = [t['slug'] for t in spec['tickets'] if t.get('express')] if lane['lane'] != 'express' else []
+        if xp: skipped.append('Express parts: ' + ', '.join(xp))
         why = '; '.join([spec.get('why') or (spec.get('description') or '').split('. ')[0], f'lane {lane["lane"]}: {"; ".join(lane["why"])}'] + skipped).strip('; ')
         rc, out, err = run(repo, [os.path.join(BIN, 'decision'), 'add', '--change', (f'milestone {spec["name"]}: {len(spec["tickets"])} tickets added ({mid})' if into else
                                                            f'milestone {spec["name"]} added: {len(spec["tickets"])} tickets'),
@@ -865,8 +926,8 @@ def cmd_add(a):
                 s['blockers'][ids[t['slug']]] = [ids.get(b, b) for b in resolved[t['slug']]]
                 s['sizes'][ids[t['slug']]] = units(t.get('estimate', 1))
             if reviewed: s.setdefault('plan_reviewed', {}).update(reviewed)
-            if lane['lane'] == 'express':
-                for t in spec['tickets']: s.setdefault('lanes', {})[ids[t['slug']]] = 'express'
+            for t in spec['tickets']:
+                if lane['lane'] == 'express' or t.get('express') is True: s.setdefault('lanes', {})[ids[t['slug']]] = 'express'
             (s.get('proposed_milestones') or {}).pop(mid, None)
             return apply_schedule(s)
 
@@ -934,6 +995,7 @@ def cmd_seed(a):
             s['sizes'].setdefault(ids[t['slug']], units(t.get('estimate', 1)))
             if ids[t['slug']] not in s.get('done', []) and ids[t['slug']] not in s.setdefault('queue', []):
                 s['queue'].append(ids[t['slug']])
+            if t.get('express') is True: s.setdefault('lanes', {})[ids[t['slug']]] = 'express'  # an Express part (milestone parts --apply)
         return apply_schedule(s)
 
     try: warnings = lib.update_state(repo, fn)
@@ -1217,6 +1279,7 @@ def main():
     ad.add_argument('--skip-premortem', metavar='WHY'); ad.add_argument('--skip-review', metavar='WHY')
     ad.add_argument('--approved', action='store_true'); ad.add_argument('--by'); ad.add_argument('--source')
     se = sub.add_parser('seed'); se.add_argument('tickets')
+    pa = sub.add_parser('parts'); pa.add_argument('file'); pa.add_argument('--apply', action='store_true')
     ao = sub.add_parser('adopt'); ao.add_argument('--id', required=True); ao.add_argument('--name', required=True)
     ao.add_argument('--issues', required=True); ao.add_argument('--linear-id'); ao.add_argument('--create-linear', action='store_true')
     ao.add_argument('--description'); ao.add_argument('--why')
@@ -1230,7 +1293,7 @@ def main():
     a = p.parse_args()
     if a.cmd == 'add' and any(x is not None and not x.strip() for x in (a.skip_premortem, a.skip_review)):
         die('--skip-premortem / --skip-review need the reason')
-    {'list': cmd_list, 'seed': cmd_seed, 'add': cmd_add, 'adopt': cmd_adopt, 'recompute': cmd_recompute, 'sync': cmd_sync,
+    {'list': cmd_list, 'parts': cmd_parts, 'seed': cmd_seed, 'add': cmd_add, 'adopt': cmd_adopt, 'recompute': cmd_recompute, 'sync': cmd_sync,
      'tidy': cmd_tidy, 'whatif': cmd_whatif, 'proposed': cmd_proposed}[a.cmd](a)
 
 

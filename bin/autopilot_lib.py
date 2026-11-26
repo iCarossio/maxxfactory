@@ -1313,13 +1313,10 @@ def spec_lane(spec):
             'tickets': len(tickets), 'risk': active, 'hints': hints, 'errors': errors}
 
 
-def express_spec(spec):
-    """The spec of an Express change as the one ticket it runs as: the tickets of the spec become its ordered steps
-    (one implementer, one worktree, one review of the final diff). The step `CHECKS:` lines are joined into the
-    ticket's one `CHECKS:` line. Blockers outside the spec are kept."""
-    tickets = spec.get('tickets') or []
-    if len(tickets) == 1 and tickets[0].get('express'):
-        return spec
+def merge_tickets(tickets, slug, title):
+    """Several spec tickets as the one Express ticket they run as: its ordered steps (one implementer, one worktree,
+    one review of the final diff). The step `CHECKS:` lines are joined into the ticket's one `CHECKS:` line. Blockers
+    outside the group are kept. Mechanical lines stay out of `lines`."""
     slugs = [t.get('slug') for t in tickets]
     checks, fast, body = [], [], []
     for i, t in enumerate(tickets, 1):
@@ -1333,15 +1330,154 @@ def express_spec(spec):
             'and run its check before the next one.\n\n')
     desc = head + '\n\n'.join(body) + ('\n\nCHECKS: ' + ' && '.join('(%s)' % c for c in checks) if checks else '') \
         + ('\nCHECKS_FAST: ' + ' && '.join('(%s)' % c for c in fast) if fast and len(fast) == len(tickets) else '')
-    one = {'slug': spec.get('id') or slugs[0], 'title': spec.get('batch') or spec.get('name') or slugs[0], 'description': desc,
+    num = lambda v: v if isinstance(v, int) and not isinstance(v, bool) else 0
+    one = {'slug': slug, 'title': title, 'description': desc,
            'estimate': 'M', 'express': True, 'priority': min([t.get('priority', 3) for t in tickets] or [3]),
-           'lines': sum(t.get('lines') or 0 for t in tickets),
+           'lines': sum(num(t.get('lines')) for t in tickets if t.get('mechanical') is not True),
+           'mechanical_lines': sum(num(t.get('mechanical_lines')) + (num(t.get('lines')) if t.get('mechanical') is True else 0) for t in tickets),
+           'steps': slugs,
            'touches': sorted({str(p) for t in tickets for p in (t.get('touches') or [])}),
            'blocked_by': sorted({b for t in tickets for b in (t.get('blocked_by') or []) if b not in slugs}),
            'labels': sorted({x for t in tickets for x in (t.get('labels') or [])})}
+    for k in ('milestone',):
+        if tickets and tickets[0].get(k) is not None: one[k] = tickets[0][k]
     ideas = [t['from_idea'] for t in tickets if t.get('from_idea')]
     if ideas: one['from_idea'] = ideas[0]
-    return dict(spec, tickets=[one])
+    return one
+
+
+def express_spec(spec):
+    """The spec of an Express change as the one ticket it runs as (`merge_tickets`)."""
+    tickets = spec.get('tickets') or []
+    if len(tickets) == 1 and tickets[0].get('express'):
+        return spec
+    return dict(spec, tickets=[merge_tickets(tickets, spec.get('id') or tickets[0].get('slug'),
+                                             spec.get('batch') or spec.get('name') or tickets[0].get('slug'))])
+
+
+# Express parts of a big plan (2026-11-25). A Standard or Full plan (or a new project's tickets.json) often holds
+# chains of small tickets that would each wait a stage. `express_parts` finds the groups that can safely run as ONE
+# Express ticket each, while the plan as a whole keeps its pre-mortem and plan review. Safe means, all enforced here:
+#   - the plan declares `risk` (a plan that does not has no parts: fail closed), and every declared flag is carried
+#     by at least one ticket (its own `"risk": [...]`, or its text), so the risky tickets are known;
+#   - every ticket of a part is sized in `lines` (or is `"mechanical": true`), carries no risk flag of its own
+#     (declared, or found in its title or description and not cleared in `risk_cleared`), and promotes no idea;
+#   - a part holds at most EXPRESS_MAX_LINES non-mechanical lines, tickets of one milestone, linked by `blocked_by`;
+#   - merging the part into one ticket creates no dependency cycle (no ticket outside it sits between two of its
+#     tickets), so every other ticket keeps its blockers.
+# Nothing applies by itself: the spec opts in with `"express_parts": "auto"` or an explicit list of slug lists, the
+# owner sees the parts at approval, and the plan reviewer is told to object to an unsafe one.
+
+def ticket_risk(t, spec):
+    """Risk flags one ticket carries: declared on it, or found in its own text and not cleared."""
+    cleared = set(spec.get('risk_cleared') or {}) | set(t.get('risk_cleared') or {})
+    out = {x for x in (t.get('risk') or []) if x in RISK_FLAGS}
+    text = '%s\n%s' % (t.get('title') or '', t.get('description') or '')
+    for flag, rx in RISK_FLAGS.items():
+        if flag not in cleared and re.search(rx, text, re.I):
+            out.add(flag)
+    return sorted(out)
+
+
+def express_parts(spec, wanted=None):
+    """{'parts': [[slug, ...], ...], 'skipped': {slug: why}, 'errors': [...], 'why': str or None}.
+    `wanted` None or 'auto': the groups of two or more tickets found by the rules above. A list of slug lists: those
+    groups, each checked against the same rules (one ticket alone is allowed there); a group that breaks one is an error."""
+    tickets = spec.get('tickets') or []
+    by = {t.get('slug'): t for t in tickets}
+    out = {'parts': [], 'skipped': {}, 'errors': [], 'why': None}
+    declared = spec.get('risk')
+    if not isinstance(declared, list):
+        out['why'] = 'the plan declares no `risk` list: no Express part (write "risk": [] when no flag applies)'
+        return out
+    risk = {s: ticket_risk(t, spec) for s, t in by.items()}
+    orphan = [f for f in declared if f in RISK_FLAGS and not any(f in v for v in risk.values())]
+    if orphan:
+        out['why'] = ('risk %s is declared but no ticket carries it: put "risk": ["%s"] on the tickets it concerns, so the '
+                      'others can be told apart' % (', '.join(orphan), orphan[0]))
+        return out
+    num = lambda v: v if isinstance(v, int) and not isinstance(v, bool) else None
+    for s, t in by.items():
+        if t.get('express') is True: out['skipped'][s] = 'already an Express ticket'
+        elif risk[s]: out['skipped'][s] = 'risk flag: ' + ', '.join(risk[s])
+        elif t.get('from_idea'): out['skipped'][s] = 'promotes an idea (kept as its own ticket)'
+        elif t.get('mechanical') is not True and num(t.get('lines')) is None: out['skipped'][s] = 'no `lines`'
+    ok = [s for s in by if s not in out['skipped']]
+    deps = {s: [b for b in (t.get('blocked_by') or []) if b in by] for s, t in by.items()}
+    anc = {}
+
+    def ancestors(s):
+        if s not in anc:
+            anc[s] = set()
+            for b in deps[s]:
+                anc[s] |= {b} | ancestors(b)
+        return anc[s]
+    for s in by: ancestors(s)
+    size = lambda g: sum(num(by[s].get('lines')) or 0 for s in g if by[s].get('mechanical') is not True)
+
+    def problem(g):
+        g = list(g)
+        bad = [s for s in g if s not in by]
+        if bad: return 'unknown slug %s' % ', '.join(bad)
+        bad = [s for s in g if s in out['skipped']]
+        if bad: return '%s: %s' % (bad[0], out['skipped'][bad[0]])
+        if len({by[s].get('milestone') for s in g}) > 1: return 'tickets of several milestones'
+        if size(g) > EXPRESS_MAX_LINES: return '%d non-mechanical lines (max %d)' % (size(g), EXPRESS_MAX_LINES)
+        gs = set(g)
+        if len(g) > 1 and any(not ((set(deps[s]) | {x for x in g if s in deps[x]}) & gs) for s in g):
+            return 'not one chain: a ticket is linked to no other ticket of the part by blocked_by'
+        between = [x for x in by if x not in gs and (anc[x] & gs) and any(x in anc[s] for s in g)]
+        if between: return 'ticket %s sits between two tickets of the part: merging them would make a cycle' % between[0]
+        return None
+    if isinstance(wanted, list):
+        seen = set()
+        for g in wanted:
+            g = [str(x) for x in (g if isinstance(g, list) else [g])]
+            why = problem(g) or ('a ticket is in two parts' if seen & set(g) else None)
+            if why: out['errors'].append('express part [%s]: %s' % (', '.join(g), why))
+            else: out['parts'].append(sorted(g, key=list(by).index)); seen |= set(g)
+        return out
+    order, placed = [], set()
+    while len(order) < len(by):  # topological order, spec order inside a level
+        level = [s for s in by if s not in placed and all(b in placed for b in deps[s])]
+        if not level: break
+        order += level; placed |= set(level)
+    groups = []
+    for s in order:
+        if s not in ok: continue
+        for g in groups:
+            if (set(deps[s]) & set(g)) and problem(g + [s]) is None:
+                g.append(s); break
+        else:
+            groups.append([s])
+    out['parts'] = [g for g in groups if len(g) > 1]
+    return out
+
+
+def apply_express_parts(spec, parts):
+    """The spec with each part merged into one Express ticket (slug `xp-<first slug>`, in the place of its first
+    ticket); every other ticket's `blocked_by` follows."""
+    tickets = spec.get('tickets') or []
+    by = {t.get('slug'): t for t in tickets}
+    name = {}
+    for g in parts:
+        for s in g: name[s] = 'xp-%s' % g[0]
+    merged = {}
+    for g in parts:
+        one = merge_tickets([by[s] for s in g], 'xp-%s' % g[0],
+                            ('Express: ' + ' + '.join(str(by[s].get('title') or s) for s in g))[:200])
+        merged[g[0]] = one
+    out = []
+    for t in tickets:
+        s = t.get('slug')
+        if s in merged: t = merged[s]
+        elif s in name: continue
+        t = dict(t)
+        t['blocked_by'] = list(dict.fromkeys(name.get(b, b) for b in (t.get('blocked_by') or []) if name.get(b, b) != t['slug']))
+        out.append(t)
+    return dict(spec, tickets=out)
+
+
 SHARED_DIR_SEGMENTS = {'tests', 'test', '__tests__', 'docs'}  # any path segment, not only the repo root
 SHARED_FILE_GLOBS = ('*.test.*', '*.spec.*', 'test_*.py', '*_test.py')
 SHARED_PREFIXES = ('e2e/artifacts',)  # side-by-side artifacts are not a collision

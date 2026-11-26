@@ -946,6 +946,43 @@ OUT=$(AUTOPILOT_REPO=$MR POOL=plan_review WAIT=0 FAKE_BEHAVIOUR=approve $H/bin/r
 check "reviews: no fixed number of reasons or findings in any prompt; every finding carries a class" "$(grep -cE 'at most 10|5 to 12' $H/prompts/*.md | awk -F: '{s+=$2} END{print s}') $(grep -l 'kpi-blocking|hardening|out-of-scope' $H/prompts/*.md | wc -l | tr -d ' ') $(python3 -c "
 import os,sys;sys.path.insert(0,os.environ['H']+'/bin');import autopilot_lib as l
 g,_=l.validate_reasons({'verdict':'premortem','reasons':[{'id':'a','probability':0.5,'impact':'severe','why':'w','guardrail':'g'},{'id':'b','probability':0.5,'impact':'severe','why':'w','guardrail':'g','class':'hardening'}]});print([r['class'] for r in g])")" "0 4 ['kpi-blocking', 'hardening']"
+# Express parts of a bigger plan: found by rule, applied only when the spec opts in.
+PARTS() { python3 -c "
+import json,os,sys;sys.path.insert(0,os.environ['H']+'/bin');import autopilot_lib as l
+T=lambda s,b=(),**k: dict(dict(slug=s,title=s,description='do it',touches=[s],lines=100,blocked_by=list(b)),**k)
+sp=eval(sys.argv[1]);r=l.express_parts(sp, sp.get('express_parts') if isinstance(sp.get('express_parts'),list) else None)
+print(r['parts'], sorted(r['skipped']), len(r['errors']), bool(r['why']))" "$1"; }
+check "parts: chains of small sized tickets with no risk; the risky and the unsized ones stay out" "$(PARTS "{'risk':['auth'],'tickets':[T('a'),T('b',['a']),T('c',['b'],risk=['auth']),T('d',['c']),T('e',['d']),T('h',['e'],lines=None)]}")" "[['a', 'b'], ['d', 'e']] ['c', 'h'] 0 False"
+check "parts: none without a risk list, none when a declared flag is on no ticket" "$(PARTS "{'tickets':[T('a'),T('b',['a'])]}") $(PARTS "{'risk':['payments'],'tickets':[T('a'),T('b',['a'])]}")" "[] [] 0 True [] [] 0 True"
+check "parts: a risk found in a ticket's own text keeps it out; 600 lines cap a part" "$(PARTS "{'risk':[],'tickets':[T('a'),T('b',['a'],description='rotate the API key'),T('c',['a'])]}") $(PARTS "{'risk':[],'tickets':[T('a',lines=350),T('b',['a'],lines=350),T('c',['b'],lines=200)]}")" "[['a', 'c']] ['b'] 0 False [['b', 'c']] [] 0 False"
+check "parts: an explicit part that would make a cycle, or holds a risky ticket, is refused" "$(PARTS "{'risk':[],'express_parts':[['a','c']],'tickets':[T('a'),T('b',['a'],lines=None),T('c',['b'])]}") $(PARTS "{'risk':['auth'],'express_parts':[['a','b']],'tickets':[T('a'),T('b',['a'],risk=['auth'])]}")" "[] ['b'] 1 False [] ['b'] 1 False"
+check "parts applied: one Express ticket per part, the other tickets' blockers follow, the shape stays valid" "$(python3 -c "
+import os,sys;sys.path.insert(0,os.environ['H']+'/bin');import autopilot_lib as l
+T=lambda s,b=(),**k: dict(dict(slug=s,title=s,description='do it\\nCHECKS: true',touches=[s],lines=100,blocked_by=list(b)),**k)
+sp={'risk':['auth'],'tickets':[T('a'),T('b',['a']),T('c',['b'],risk=['auth']),T('d',['c']),T('e',['d'])]}
+n=l.apply_express_parts(sp,l.express_parts(sp)['parts']);print([(t['slug'],t['blocked_by'],bool(t.get('express'))) for t in n['tickets']], n['tickets'][0]['steps'], len(l.ticket_shape_errors(n['tickets'])))")" "[('xp-a', [], True), ('c', ['xp-a'], False), ('xp-d', ['c'], True)] ['a', 'b'] 0"
+cat > $SCR/big.json <<'EOF'
+{"into": "ext", "id": "ext-big", "name": "Bigger batch", "description": "Several endpoints and a risky one.", "why": "the owner adds a batch", "risk": ["payments"],
+ "rehearsal": {"cmd": "make test", "result": "all pass"},
+ "tickets": [{"slug": "bg-a", "title": "A", "description": "Do a.\nCHECKS: true", "estimate": "S", "lines": 90, "touches": ["api/a.py"]},
+             {"slug": "bg-b", "title": "B", "description": "Do b.\nCHECKS: true", "estimate": "S", "lines": 90, "touches": ["api/b.py"], "blocked_by": ["bg-a"]},
+             {"slug": "bg-pay", "title": "Charge the card", "description": "Do it.\nCHECKS: true", "estimate": "S", "lines": 90, "risk": ["payments"], "touches": ["api/pay.py"], "blocked_by": ["bg-b"]}]}
+EOF
+OUT=$(MS add $SCR/big.json --dry-run 2>&1)
+check "add --dry-run on a Full plan: the Express parts are listed, not applied" "$(echo "$OUT" | grep -c '^Lane: full (risk flag: payments)') $(echo "$OUT" | grep -c '^Express parts (safe for Express; add "express_parts": "auto"') $(echo "$OUT" | grep -c '^  xp-bg-a: bg-a, bg-b$') $(echo "$OUT" | grep -c 'not eligible: bg-pay (risk flag: payments)') $(echo "$OUT" | grep -c '^valid: 3 tickets')" "1 1 1 1 1"
+MS proposed --drop ext-big >/dev/null 2>&1
+python3 -c "import json;p='$SCR/big.json';s=json.load(open(p));s['express_parts']='auto';json.dump(s,open(p,'w'))"
+OUT=$(FAKE_BEHAVIOUR=auto MS add $SCR/big.json --review-k 1 2>&1); RC=$?
+check "opted in: the plan keeps its plan review, and the reviewer is told the Express parts" "$RC $(echo "$OUT" | grep -c '^--- review: .*ext-big/plan-review.md') $(grep -c '^Express parts: the tickets xp-bg-a each merge' $MR/.autopilot/plan/milestones/ext-big/review-input-1.md)" "3 1 1"
+MS add $SCR/big.json --approved --by owner --source 'user:"go"' >/dev/null 2>&1
+check "approved: the part is one Express ticket in state lanes; the risky ticket is not" "$(J $MR/.autopilot/state.json "[x for x in [m for m in d['milestones'] if m['id']=='ext'][0]['additions'] if x['id']=='ext-big'][0]['issues']" | python3 -c "
+import json,sys,ast;ids=ast.literal_eval(sys.stdin.read());d=json.load(open('$MR/.autopilot/state.json'));print(len(ids), [d['lanes'].get(i) for i in ids])")" "2 ['express', None]"
+python3 -c "
+import json;json.dump({'project': {'name': 'P'}, 'risk': [], 'milestones': [{'name': 'M1'}], 'tickets': [
+ {'slug': 'pa', 'title': 'A', 'milestone': 'M1', 'estimate': 1, 'lines': 50, 'touches': ['a.py']},
+ {'slug': 'pb', 'title': 'B', 'milestone': 'M1', 'estimate': 1, 'lines': 50, 'touches': ['b.py'], 'blocked_by': ['pa']}]}, open('$SCR/pt.json', 'w'))"
+OUT=$($H/bin/milestone parts $SCR/pt.json --apply 2>&1)
+check "milestone parts --apply on a new project's tickets.json: the part is merged in the file" "$? $(echo "$OUT" | grep -c 'pt.json: 2 tickets -> 1') $(J $SCR/pt.json "[(t['slug'], t['express'], t['milestone']) for t in d['tickets']]")" "0 1 [('xp-pa', True, 'M1')]"
 SD=$SCR/seed-repo; mkdir -p $SD/.autopilot/plan && echo '{"branch": "x", "queue": [], "done": []}' > $SD/.autopilot/state.json
 cat > $SD/.autopilot/plan/tickets.json <<'EOF'
 {"project": {"name": "P"}, "milestones": [{"name": "M1 Base"}, {"name": "M2 More"}],
